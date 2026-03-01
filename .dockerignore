@@ -1,0 +1,11 @@
+.git
+.github
+.gitignore
+.dockerignore
+*.md
+infra/
+scripts/
+docker-compose*.yml
+.env*
+PLAN.md
+SHARED_TASK_NOTES.md

@@ -1,0 +1,50 @@
+# Dependencies
+/vendor/
+/node_modules/
+
+# Drupal files (managed via Azure File Shares in production)
+/web/sites/default/files/
+/private/
+
+# Drupal local settings
+/web/sites/default/settings.local.php
+/web/sites/*/services.yml
+/web/sites/*/settings.local.php
+
+# Composer
+/web/core/
+/web/modules/contrib/
+/web/themes/contrib/
+/web/profiles/contrib/
+/web/libraries/
+
+# Environment and secrets
+.env
+.env.*
+*.pem
+*.key
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Build artifacts
+*.tar.gz
+*.sql
+*.sql.gz
+
+# Claude / agent files
+.claude/
+CLAUDE.md
+SHARED_TASK_NOTES.md
+
+# Temporary
+tmp/
+temp/
