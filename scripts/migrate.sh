@@ -13,8 +13,19 @@
 #   - SSH access to cPanel host
 #
 # Usage: ./migrate.sh
+#
+# Environment variable overrides (skip prompts when set):
+#   CPANEL_HOST, CPANEL_USER, CPANEL_DB_NAME, CPANEL_DB_USER, CPANEL_DB_PASS
+#   CPANEL_DRUPAL_ROOT (default: /home/$CPANEL_USER/public_html)
+#   AZURE_RG, AZURE_MYSQL_HOST, AZURE_MYSQL_USER, AZURE_MYSQL_PASS
+#   AZURE_MYSQL_DB (default: drupal), AZURE_STORAGE_ACCOUNT
 ###############################################################################
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# ── Shared prompt library ──
+source "$SCRIPT_DIR/lib/prompt.sh"
 
 # ── Colors ──────────────────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -31,32 +42,39 @@ warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 err()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 step()  { echo -e "\n${CYAN}${BOLD}▸ $*${NC}"; }
 
-# ── Configuration ───────────────────────────────────────────────────────────
-# cPanel source
-CPANEL_HOST="${CPANEL_HOST:?Set CPANEL_HOST (e.g. example.com)}"
-CPANEL_USER="${CPANEL_USER:?Set CPANEL_USER (SSH username)}"
-CPANEL_DB_NAME="${CPANEL_DB_NAME:?Set CPANEL_DB_NAME}"
-CPANEL_DB_USER="${CPANEL_DB_USER:?Set CPANEL_DB_USER}"
-CPANEL_DB_PASS="${CPANEL_DB_PASS:?Set CPANEL_DB_PASS}"
-CPANEL_DRUPAL_ROOT="${CPANEL_DRUPAL_ROOT:-/home/${CPANEL_USER}/public_html}"
-
-# Azure destination (read from Bicep outputs or set manually)
-AZURE_RG="${AZURE_RG:?Set AZURE_RG (resource group name)}"
-AZURE_MYSQL_HOST="${AZURE_MYSQL_HOST:?Set AZURE_MYSQL_HOST (e.g. mysql-drupal-xxx.mysql.database.azure.com)}"
-AZURE_MYSQL_USER="${AZURE_MYSQL_USER:?Set AZURE_MYSQL_USER}"
-AZURE_MYSQL_PASS="${AZURE_MYSQL_PASS:?Set AZURE_MYSQL_PASS}"
-AZURE_MYSQL_DB="${AZURE_MYSQL_DB:-drupal}"
-AZURE_STORAGE_ACCOUNT="${AZURE_STORAGE_ACCOUNT:?Set AZURE_STORAGE_ACCOUNT}"
-
-# Working directory for temporary files
-WORK_DIR=$(mktemp -d)
-trap 'rm -rf "$WORK_DIR"' EXIT
-
 echo -e "${BOLD}${CYAN}"
 echo "╔══════════════════════════════════════════════════════════════╗"
 echo "║         cPanel → Azure Container Apps Migration             ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo -e "${NC}"
+
+# ── Interactive prompts — cPanel source ──
+step "cPanel source configuration"
+
+prompt_val    CPANEL_HOST    "cPanel hostname (e.g. example.com)"
+prompt_val    CPANEL_USER    "cPanel SSH username"
+prompt_val    CPANEL_DB_NAME "cPanel database name"
+prompt_val    CPANEL_DB_USER "cPanel database username"
+prompt_secret CPANEL_DB_PASS "cPanel database password"
+
+# Drupal root defaults to /home/<user>/public_html
+prompt_val CPANEL_DRUPAL_ROOT "cPanel Drupal root" "/home/${CPANEL_USER}/public_html"
+
+# ── Interactive prompts — Azure destination ──
+step "Azure destination configuration"
+
+prompt_val    AZURE_RG              "Azure resource group"
+prompt_val    AZURE_MYSQL_HOST      "Azure MySQL host (e.g. mysql-drupal-xxx.mysql.database.azure.com)"
+prompt_val    AZURE_MYSQL_USER      "Azure MySQL username"
+prompt_secret AZURE_MYSQL_PASS      "Azure MySQL password"
+prompt_val    AZURE_MYSQL_DB        "Azure MySQL database name" "drupal"
+prompt_val    AZURE_STORAGE_ACCOUNT "Azure storage account name"
+
+# Working directory for temporary files
+WORK_DIR=$(mktemp -d)
+trap 'rm -rf "$WORK_DIR"' EXIT
+
+echo ""
 echo "  Source:  ${CPANEL_USER}@${CPANEL_HOST}"
 echo "  Target:  ${AZURE_RG} (${AZURE_MYSQL_HOST})"
 echo ""

@@ -3,11 +3,21 @@
 # azure-up.sh — Deploy / Update the Bicep infrastructure stack
 #
 # Usage: ./scripts/azure-up.sh [--what-if]
+#
+# Environment variable overrides (skip prompts when set):
+#   AZURE_SUBSCRIPTION   — Azure subscription ID
+#   AZURE_LOCATION       — Azure region (default: eastus)
+#   AZURE_BASE_NAME      — Resource name prefix (default: drupal)
+#   AZURE_ENVIRONMENT    — Deployment environment (dev|staging|prod)
+#   MYSQL_ADMIN_PASSWORD — MySQL admin password
 ###############################################################################
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# ── Shared prompt library ──
+source "$SCRIPT_DIR/lib/prompt.sh"
 
 # ── Colors ──
 RED='\033[0;31m'
@@ -24,12 +34,8 @@ warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 err()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 step()  { echo -e "\n${CYAN}${BOLD}▸ $*${NC}"; }
 
-# ── Defaults ──
-LOCATION="${AZURE_LOCATION:-eastus}"
-BASE_NAME="${AZURE_BASE_NAME:-drupal}"
-ENVIRONMENT="${AZURE_ENVIRONMENT:-prod}"
+# ── Parse args ──
 WHAT_IF=false
-
 if [[ "${1:-}" == "--what-if" ]]; then
   WHAT_IF=true
   warn "Running in what-if mode (no changes will be made)"
@@ -56,16 +62,28 @@ if [[ -z "$ACCOUNT" ]]; then
 fi
 ok "Logged in to Azure: $ACCOUNT"
 
-# ── Prompt for MySQL password if not set ──
-if [[ -z "${MYSQL_ADMIN_PASSWORD:-}" ]]; then
-  echo -en "${YELLOW}Enter MySQL admin password: ${NC}"
-  read -rs MYSQL_ADMIN_PASSWORD
-  echo ""
-  export MYSQL_ADMIN_PASSWORD
-fi
+# ── Interactive prompts (skipped when env vars are set) ──
+step "Configuration"
+
+prompt_subscription
+
+prompt_val AZURE_LOCATION "Azure region" "eastus"
+LOCATION="$AZURE_LOCATION"
+
+prompt_val AZURE_BASE_NAME "Resource name prefix" "drupal"
+BASE_NAME="$AZURE_BASE_NAME"
+
+prompt_select AZURE_ENVIRONMENT "Deployment environment" "prod" "staging" "dev"
+ENVIRONMENT="$AZURE_ENVIRONMENT"
+
+prompt_secret MYSQL_ADMIN_PASSWORD "MySQL admin password"
 
 # ── Deploy ──
 step "Deploying Bicep template"
+
+info "Location:    $LOCATION"
+info "Base name:   $BASE_NAME"
+info "Environment: $ENVIRONMENT"
 
 DEPLOY_CMD=(
   az deployment sub create

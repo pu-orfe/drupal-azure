@@ -3,8 +3,16 @@
 # azure-backup.sh — On-demand backup of Database and File Shares
 #
 # Usage: ./scripts/azure-backup.sh
+#
+# Environment variable overrides (skip prompts when set):
+#   AZURE_RESOURCE_GROUP — Azure resource group name
 ###############################################################################
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# ── Shared prompt library ──
+source "$SCRIPT_DIR/lib/prompt.sh"
 
 # ── Colors ──
 RED='\033[0;31m'
@@ -22,7 +30,6 @@ err()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 step()  { echo -e "\n${CYAN}${BOLD}▸ $*${NC}"; }
 
 # ── Configuration ──
-RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:-}"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 
 echo -e "${BOLD}${CYAN}"
@@ -31,15 +38,10 @@ echo "║                   Azure Backup Utility                      ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo -e "${NC}"
 
-# ── Auto-detect resource group ──
-if [[ -z "$RESOURCE_GROUP" ]]; then
-  info "Detecting resource group..."
-  RESOURCE_GROUP=$(az group list --query "[?starts_with(name,'rg-drupal')].name | [0]" -o tsv)
-  if [[ -z "$RESOURCE_GROUP" ]]; then
-    err "Could not detect resource group. Set AZURE_RESOURCE_GROUP."
-    exit 1
-  fi
-fi
+# ── Interactive prompts (skipped when env vars are set) ──
+prompt_resource_group
+
+RESOURCE_GROUP="$AZURE_RESOURCE_GROUP"
 ok "Resource group: $RESOURCE_GROUP"
 
 ###############################################################################

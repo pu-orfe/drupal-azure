@@ -5,8 +5,16 @@
 # WARNING: This is destructive! It deletes the entire resource group.
 #
 # Usage: ./scripts/azure-nuke.sh
+#
+# Environment variable overrides (skip prompts when set):
+#   AZURE_RESOURCE_GROUP — Azure resource group name
 ###############################################################################
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# ── Shared prompt library ──
+source "$SCRIPT_DIR/lib/prompt.sh"
 
 # ── Colors ──
 RED='\033[0;31m'
@@ -22,24 +30,16 @@ ok()    { echo -e "${GREEN}[OK]${NC}    $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 err()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 
-# ── Configuration ──
-RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:-}"
-
 echo -e "${BOLD}${RED}"
 echo "╔══════════════════════════════════════════════════════════════╗"
 echo "║          ⚠  DANGER: Infrastructure Teardown  ⚠              ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo -e "${NC}"
 
-# ── Auto-detect resource group ──
-if [[ -z "$RESOURCE_GROUP" ]]; then
-  info "Detecting resource group..."
-  RESOURCE_GROUP=$(az group list --query "[?starts_with(name,'rg-drupal')].name | [0]" -o tsv)
-  if [[ -z "$RESOURCE_GROUP" ]]; then
-    err "Could not detect resource group. Set AZURE_RESOURCE_GROUP."
-    exit 1
-  fi
-fi
+# ── Interactive prompts (skipped when env vars are set) ──
+prompt_resource_group
+
+RESOURCE_GROUP="$AZURE_RESOURCE_GROUP"
 
 echo -e "  Resource Group: ${RED}${BOLD}${RESOURCE_GROUP}${NC}"
 echo ""
@@ -69,7 +69,6 @@ fi
 # ── Create a backup first ──
 echo ""
 warn "Creating a safety backup before deletion..."
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [[ -f "$SCRIPT_DIR/azure-backup.sh" ]]; then
   bash "$SCRIPT_DIR/azure-backup.sh" || warn "Backup failed — proceeding with deletion anyway"
 else

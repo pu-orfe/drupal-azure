@@ -2,9 +2,18 @@
 ###############################################################################
 # azure-logs.sh — Stream real-time logs from the Drupal Container App
 #
-# Usage: ./scripts/azure-logs.sh [--tail N] [--follow]
+# Usage: ./scripts/azure-logs.sh [--tail N] [--follow] [--no-follow]
+#
+# Environment variable overrides (skip prompts when set):
+#   AZURE_RESOURCE_GROUP      — Azure resource group name
+#   AZURE_CONTAINER_APP_NAME  — Container app name
 ###############################################################################
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# ── Shared prompt library ──
+source "$SCRIPT_DIR/lib/prompt.sh"
 
 # ── Colors ──
 RED='\033[0;31m'
@@ -20,8 +29,6 @@ ok()    { echo -e "${GREEN}[OK]${NC}    $*"; }
 err()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 
 # ── Configuration ──
-RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:-}"
-CONTAINER_APP="${AZURE_CONTAINER_APP_NAME:-}"
 TAIL_LINES=100
 FOLLOW=true
 
@@ -41,26 +48,9 @@ echo "║                 Container App Log Viewer                    ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo -e "${NC}"
 
-# ── Auto-detect resource group and app name ──
-if [[ -z "$RESOURCE_GROUP" ]]; then
-  info "Detecting resource group..."
-  RESOURCE_GROUP=$(az group list --query "[?starts_with(name,'rg-drupal')].name | [0]" -o tsv)
-  if [[ -z "$RESOURCE_GROUP" ]]; then
-    err "Could not detect resource group. Set AZURE_RESOURCE_GROUP."
-    exit 1
-  fi
-  ok "Resource group: $RESOURCE_GROUP"
-fi
-
-if [[ -z "$CONTAINER_APP" ]]; then
-  info "Detecting container app..."
-  CONTAINER_APP=$(az containerapp list -g "$RESOURCE_GROUP" --query "[0].name" -o tsv)
-  if [[ -z "$CONTAINER_APP" ]]; then
-    err "Could not detect container app. Set AZURE_CONTAINER_APP_NAME."
-    exit 1
-  fi
-  ok "Container app: $CONTAINER_APP"
-fi
+# ── Interactive prompts (skipped when env vars are set) ──
+prompt_resource_group
+prompt_container_app
 
 # ── Stream logs ──
 info "Streaming logs (last $TAIL_LINES lines)..."
@@ -72,8 +62,8 @@ if $FOLLOW; then
 fi
 
 az containerapp logs show \
-  --name "$CONTAINER_APP" \
-  --resource-group "$RESOURCE_GROUP" \
+  --name "$AZURE_CONTAINER_APP_NAME" \
+  --resource-group "$AZURE_RESOURCE_GROUP" \
   --tail "$TAIL_LINES" \
   "${FOLLOW_ARGS[@]}" \
   --type console
