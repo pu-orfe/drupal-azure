@@ -55,10 +55,22 @@ jobs:
           php-version: "8.2"
           tools: composer:v2
 
+      - name: Check for composer.json
+        id: check
+        run: |
+          if [ -f composer.json ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::composer.json not found — skipping composer update (merge Drupal codebase into repo root first)"
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Composer Update
+        if: steps.check.outputs.found == 'true'
         run: composer update --no-dev --no-interaction --prefer-dist
 
       - name: Commit composer.lock
+        if: steps.check.outputs.found == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
