@@ -22,9 +22,6 @@ on:
         description: "Run composer update before building?"
         type: boolean
         default: true
-  schedule:
-    # Weekly on Sunday at 03:00 UTC
-    - cron: "0 3 * * 0"
 
 env:
   # ── Azure resource names (must match your Bicep deployment) ──
