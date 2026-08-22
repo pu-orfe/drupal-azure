@@ -5,13 +5,19 @@ to stop a deliberate decision being "simplified" away by someone who has not yet
 hit the failure it prevents.
 
 Every row below is a real incident from one of two live Drupal-on-Azure
-deployments (`graddb` and `thesis-system`, both App Service, both in production).
-Each names where the fix lives and, where one exists, the test that pins it — so
-if you are about to change one of those files, this tells you what you are
-holding.
+deployments, both on App Service, both in production. Each names where the fix
+lives and, where one exists, the test that pins it — so if you are about to
+change one of those files, this tells you what you are holding.
 
 The deep reasoning lives in the code comments next to each fix, not here. This is
 the index.
+
+The source deployments are deliberately not named, and neither are their hosts,
+resource groups or domains. A lesson does not need provenance to be true, and
+naming an internal system alongside its operational state — "mid-migration",
+"currently failing its gate" — is a description of somebody's infrastructure
+posture. If a row reads as less credible without a name, that is a sign the row
+needs better evidence, not a name.
 
 ---
 
@@ -97,10 +103,10 @@ neither.
 
 ## Still in flight upstream (as of 2026-08-22)
 
-`graddb` is mid-migration from **MySQL 5.7 to 8.0** and heading for **Drupal 11**.
-Neither is finished, so the guidance below is provisional — but the shape of the
-work is already clear, and this template is built to accommodate it rather than
-having to be reworked for it.
+One of the two deployments is mid-migration from **MySQL 5.7 to 8.0** and heading
+for **Drupal 11**. Neither is finished, so the guidance below is provisional — but
+the shape of the work is already clear, and this template is built to accommodate
+it rather than having to be reworked for it.
 
 ### MySQL 5.7 → 8.0
 
@@ -138,7 +144,8 @@ version bump rather than a project:
 - **`drupal/genpass` is constrained `^2.0 || ^3.0`** — 3.x requires Drupal 11.3+,
   2.x covers Drupal 10 — so the move is a core bump, not a module hunt.
 
-What is worth adding before attempting it, taken from `graddb`'s pipeline:
+What is worth adding before attempting it, taken from that deployment's
+pipeline:
 
 - a **deprecation scan over first-party code only**, using
   `mglaman/phpstan-drupal` and `phpstan/phpstan-deprecation-rules` (both already

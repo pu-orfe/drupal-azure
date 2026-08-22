@@ -468,5 +468,49 @@ else
   no "documents not reachable from the map:$unreferenced"
 fi
 
+# ---------------------------------------------------------------------------
+# No internal system is named.
+#
+# This is a template that may be published. The lessons in
+# docs/production-learnings.md came from specific internal deployments, and
+# naming one alongside its operational state — "mid-migration", "currently
+# failing its gate" — publishes a description of somebody's infrastructure
+# posture. The lesson does not need the name to be true.
+#
+# Enforced as a test rather than a convention, because the temptation is to add
+# a name back in to make a claim feel better sourced.
+# ---------------------------------------------------------------------------
+printf '\ninternal system names\n'
+
+# Extend this list when a new internal deployment informs the template.
+INTERNAL_NAMES='graddb|thesis-system|thesis_system|oiwps|orfe-thesis|orfe-graddb|orfethesis|orfegraddb'
+
+named=$(grep -rInE "$INTERNAL_NAMES" \
+          --exclude-dir=.git --exclude-dir=vendor --exclude-dir=core \
+          --exclude=run.sh . 2>/dev/null \
+        | grep -v '^./web/core' || true)
+if [[ -z "$named" ]]; then
+  ok "no internal deployment is named anywhere in the tree"
+else
+  no "an internal deployment is named:"
+  while IFS= read -r line; do
+    printf '      %s\n' "$line"
+  done <<< "$named"
+fi
+
+# Hostnames, resource groups and domains identify a system as surely as its name.
+identifying=$(grep -rInE '[a-z0-9-]+\.(azurewebsites|scm\.azurewebsites)\.net' \
+                --exclude-dir=.git --exclude-dir=vendor --exclude-dir=core . 2>/dev/null \
+              | grep -v '^./web/core' \
+              | grep -vE '\$\{|\$[A-Z_]|<[a-z-]+>|appName|APP_NAME' || true)
+if [[ -z "$identifying" ]]; then
+  ok "no concrete Azure hostname is committed (only variables and placeholders)"
+else
+  no "a concrete Azure hostname is committed:"
+  while IFS= read -r line; do
+    printf '      %s\n' "$line"
+  done <<< "$identifying"
+fi
+
 printf '\n%d passed, %d failed\n' "$PASSED" "$FAILED"
 [[ "$FAILED" -eq 0 ]]
