@@ -11,7 +11,8 @@ Start at the repository [README](../README.md) if you have not already.
 | 3 | **[Configuration](configuration.md)** | Every variable, and where it comes from |
 | 4 | **[Authentication](authentication.md)** | Entra-only logins |
 | 5 | **[Secrets](secrets.md)** | Key Vault and rotation |
-| 6 | **[GitHub Actions](github-actions.md)** | OIDC federation for CI |
+| 6 | **[Outbound email](email.md)** | Logic App + Office 365; one manual consent |
+| 7 | **[GitHub Actions](github-actions.md)** | OIDC federation for CI |
 
 ## When you need them
 

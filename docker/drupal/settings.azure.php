@@ -350,6 +350,48 @@ if ($aca_env = getenv('DRUPAL_ENVIRONMENT')) {
 }
 
 // ---------------------------------------------------------------------------
+// Outbound email.
+// ---------------------------------------------------------------------------
+// Mail goes through a Logic App fronting the Office 365 connector, called with
+// this container's managed identity — so there is no SMTP password, no API key,
+// and no tenant-wide Mail.Send grant. See docs/email.md.
+//
+// Configured here rather than in exported config because the endpoint URL is
+// environment-specific: staging and production have different Logic Apps, and
+// baking one into config/sync would make a config import point staging at
+// production's mailer.
+if ($aca_mail_url = getenv('AZURE_LOGIC_APP_MAIL_URL')) {
+  // Reject an unresolved reference for the same reason as the secrets above: it
+  // is a plausible-looking string that would be used as a URL and fail as one.
+  if (!$aca_is_unresolved_reference($aca_mail_url)) {
+    // NOTE: the mail plugin reads AZURE_LOGIC_APP_MAIL_URL from the environment
+    // itself — there is deliberately no $config key mirroring it here. An earlier
+    // draft set one, which did nothing: the value was already in the environment
+    // the plugin reads, and a config key nothing consumes is worse than no key,
+    // because it looks like the place to change the endpoint.
+    //
+    // mailsystem routes Drupal's mail through the plugin. Both keys are needed:
+    // 'sender' chooses who delivers, 'formatter' chooses who builds the body, and
+    // setting only the first leaves core's formatter producing a body the plugin
+    // then re-wraps.
+    $config['mailsystem.settings']['defaults']['sender'] = 'logic_app_mailer';
+    $config['mailsystem.settings']['defaults']['formatter'] = 'logic_app_mailer';
+  }
+  else {
+    error_log(
+      'WARNING: AZURE_LOGIC_APP_MAIL_URL is an unresolved Key Vault reference. '
+      . 'Mail is NOT configured; Drupal will fall back to PHP mail(), which on a '
+      . 'container with no MTA silently discards every message.'
+    );
+  }
+}
+// Deliberately no `else`. An unset variable means email was not provisioned —
+// a legitimate state for a review environment — and Drupal falls back to its
+// default mail system. Worth knowing that on a container with no MTA that
+// default accepts every message and delivers none, so a site that should be
+// sending mail must have this set. `setup-email.sh --status` checks it.
+
+// ---------------------------------------------------------------------------
 // Local overrides, last so they win.
 // ---------------------------------------------------------------------------
 if (file_exists($app_root . '/' . $site_path . '/settings.local.php')) {

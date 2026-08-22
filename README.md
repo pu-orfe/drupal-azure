@@ -33,6 +33,7 @@ provider-neutral setup. This is deliberately Azure-shaped.
 | **Azure Files** | Public and private upload shares, default-deny, VNet-scoped |
 | **Key Vault** | Secrets read by managed identity, generated not typed, never in the app config |
 | **Container Registry** | Pull by managed identity; the admin account is off |
+| **Outbound email** | Logic App + Office 365 connector, called with the app's managed identity — no SMTP password, no API key |
 | **One image per commit** | Rollback is repointing a tag or shifting traffic — never a rebuild |
 | **A deploy that checks itself** | Validated pre-deploy backup, schema updates before the app goes live, a smoke test that reads the response body |
 | **Local dev that matches** | MySQL 8 with production's collation and `sql_mode` |
@@ -70,6 +71,7 @@ Also available as an index: [`docs/`](docs/README.md).
 | **[Authentication](docs/authentication.md)** | Entra-only logins, and why `genpass` is not optional |
 | **[Secrets](docs/secrets.md)** | Key Vault, rotation, and proving a rotation took effect |
 | **[GitHub Actions](docs/github-actions.md)** | OIDC federation — no stored credentials |
+| **[Outbound email](docs/email.md)** | Logic App + Office 365, no SMTP password |
 | **[Migrating a site](docs/migrating-a-site.md)** | Bringing an existing Drupal site in |
 
 **Understanding it**

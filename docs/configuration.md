@@ -52,6 +52,7 @@ password, see [Secrets](secrets.md#reading-a-secret-you-actually-need).
 | `PUBLIC_SHARE_QUOTA_GB` / `PRIVATE_SHARE_QUOTA_GB` | `100` / `100` | A ceiling, not an allocation — you pay for what is used |
 | `LOG_RETENTION_DAYS` | `30` | 30 is the free allowance |
 | `DRUPAL_CRON_EXPRESSION` | `*/15 * * * *` | |
+| `DEPLOY_EMAIL` | `true` | `false` skips the mail Logic App. See [email.md](email.md) |
 
 ## Read by the settings overlay (`docker/drupal/settings.azure.php`)
 
@@ -77,6 +78,7 @@ password, see [Secrets](secrets.md#reading-a-secret-you-actually-need).
 | `DRUPAL_SESSION_COOKIE_DOMAIN` | *(host-only)* | e.g. `.example.edu` to share a session across subdomains |
 | `DRUPAL_ERROR_LEVEL` | `hide` | `verbose` locally only |
 | `DRUPAL_ENVIRONMENT` | *(unset)* | Label for the environment indicator |
+| `AZURE_LOGIC_APP_MAIL_URL` | *(unset)* | Set by `setup-email.sh`. Unset means Drupal falls back to a mail system that **accepts and discards** — see [email.md](email.md) |
 
 ## Read by the entrypoint (`docker-entrypoint.sh`)
 

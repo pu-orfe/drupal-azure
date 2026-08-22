@@ -512,5 +512,99 @@ else
   done <<< "$identifying"
 fi
 
+# ---------------------------------------------------------------------------
+# Outbound email.
+#
+# The failure mode this guards is silent: Drupal's default mail system accepts
+# every message and, on a container with no MTA, delivers none. A misconfigured
+# mailer does not error — the mail simply never arrives.
+# ---------------------------------------------------------------------------
+printf '\noutbound email\n'
+
+# The trigger must require an AAD token, not merely a shared-access signature.
+if grep -q 'openAuthenticationPolicies' infra/modules/email.bicep; then
+  ok "the Logic App trigger requires an AAD token"
+else
+  no "the Logic App trigger has no AAD policy — a leaked URL would be enough to send mail"
+fi
+
+# And the setup script must strip the SAS signature before storing the URL,
+# otherwise the AAD policy is decorative.
+if grep -q 'clean_url=.*%%\\?\*' scripts/setup-email.sh && grep -q 'sig=' scripts/setup-email.sh; then
+  ok "setup-email.sh strips the SAS signature and refuses to store one"
+else
+  no "setup-email.sh does not strip/verify the SAS signature out of the callback URL"
+fi
+
+# The 'sub' claim is what narrows the trigger from "anyone in the tenant" to
+# "this app's identity".
+if grep -q "name: 'sub'" infra/modules/email.bicep; then
+  ok "the trigger can be pinned to a single identity via a sub claim"
+else
+  no "no sub claim: any tenant principal with an ARM token could trigger the mailer"
+fi
+
+# Sovereign clouds do not use management.azure.com.
+if grep -q 'environment().resourceManager' infra/modules/email.bicep; then
+  ok "the ARM audience comes from environment(), not a hardcoded host"
+else
+  no "the ARM audience is hardcoded — this breaks in sovereign clouds"
+fi
+
+# Both platforms must provision it, and both must feed it their own egress.
+for t in infra/appservice/main.bicep infra/containerapps/main.bicep; do
+  grep -q "modules/email.bicep" "$t" && ok "$(basename "$(dirname "$t")") provisions the mailer" \
+    || no "$(basename "$(dirname "$t")") does not provision the mailer"
+  grep -q 'allowedCallerIps' "$t" && ok "$(basename "$(dirname "$t")") sets the caller IP allow-list" \
+    || no "$(basename "$(dirname "$t")") does not restrict who can trigger the mailer"
+done
+
+# mailsystem needs BOTH keys; setting only 'sender' leaves core's formatter in
+# place and the body gets built twice.
+if grep -q "mailsystem.settings'\]\['defaults'\]\['sender'\]" docker/drupal/settings.azure.php \
+   && grep -q "mailsystem.settings'\]\['defaults'\]\['formatter'\]" docker/drupal/settings.azure.php; then
+  ok "the overlay sets both the mailsystem sender and formatter"
+else
+  no "the overlay does not set both mailsystem keys"
+fi
+
+# The mail plugin requests a managed-identity token with no client_id, so the app
+# needs a SYSTEM-assigned identity for that request to be unambiguous — and the
+# Logic App's sub claim has to name that same principal. Get either wrong and mail
+# 401s at send time, silently.
+for m in infra/modules/appservice.bicep infra/modules/aca.bicep; do
+  if grep -q "type: 'SystemAssigned, UserAssigned'" "$m"; then
+    ok "$(basename "$m") attaches a system-assigned identity for the token request"
+  else
+    no "$(basename "$m") has no system-assigned identity — mail would 401 at send time"
+  fi
+  grep -q 'output systemAssignedPrincipalId' "$m" \
+    && ok "$(basename "$m") exposes that principal" \
+    || no "$(basename "$m") does not expose the system-assigned principal"
+done
+
+for t in infra/appservice/main.bicep infra/containerapps/main.bicep; do
+  if grep -q 'callerPrincipalId: .*systemAssignedPrincipalId' "$t"; then
+    ok "$(basename "$(dirname "$t")") pins the sub claim to the system-assigned principal"
+  else
+    no "$(basename "$(dirname "$t")") pins sub to the wrong principal (or not at all)"
+  fi
+done
+
+# The overlay must not pretend to configure the endpoint via config: the plugin
+# reads the environment, and a config key nothing consumes is a false lead.
+if grep -q "azure_logic_app_mailer.settings" docker/drupal/settings.azure.php; then
+  no "the overlay sets an azure_logic_app_mailer config key the plugin does not read"
+else
+  ok "the overlay does not set a config key the plugin ignores"
+fi
+
+# symfony_mailer (not -lite) takes over routing and silently bypasses the plugin.
+if grep -q '"drupal/symfony_mailer"' composer.json; then
+  no "drupal/symfony_mailer is required — it overrides mailsystem and bypasses the Logic App mailer"
+else
+  ok "drupal/symfony_mailer is absent (symfony_mailer_lite is the compatible one)"
+fi
+
 printf '\n%d passed, %d failed\n' "$PASSED" "$FAILED"
 [[ "$FAILED" -eq 0 ]]

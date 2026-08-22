@@ -211,7 +211,31 @@ outside it. That is the check being honest rather than broken.
 
 ---
 
-## 6. Hand the deploys to CI
+## 6. Finish outbound email
+
+The Logic App and Office 365 connection were created in step 3. Two things
+remain, one of which needs a human:
+
+```bash
+./scripts/setup-email.sh
+```
+
+It stores the endpoint on the app, then prints a portal URL where someone must
+sign in as the mailbox the site should send **as**. That consent cannot be
+scripted — it is how a human proves they control the mailbox, which is what buys
+you a deployment with no SMTP password.
+
+```bash
+./scripts/setup-email.sh --status
+./scripts/setup-email.sh --test you@example.edu
+```
+
+Do not skip this and assume mail works. Drupal's fallback mail system accepts
+every message and delivers none, with no error anywhere — so the first sign of
+trouble is a user who cannot reset their password. Details in
+**[Outbound email](email.md)**.
+
+## 7. Hand the deploys to CI
 
 Set up OIDC federation — no stored credentials — following
 **[GitHub Actions](github-actions.md)**. After that, a push to `main` builds,
@@ -226,6 +250,7 @@ verifies, rolls out and smoke-tests on its own.
 | Something broke | **[Troubleshooting](troubleshooting.md)** |
 | Day-to-day running | **[Operations](operations.md)** |
 | Set up logins | **[Authentication](authentication.md)** — the template is Entra-only |
+| Email not arriving | **[Outbound email](email.md)** |
 | Bring an existing site in | **[Migrating a site](migrating-a-site.md)** |
 | Change a setting | **[Configuration](configuration.md)** |
 | Understand a design decision | **[Design notes](design-notes.md)** |

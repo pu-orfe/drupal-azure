@@ -123,7 +123,21 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
   name: acaAppName
   location: location
   identity: {
-    type: 'UserAssigned'
+      // SystemAssigned AS WELL AS UserAssigned, and this is load-bearing rather
+      // than belt-and-braces.
+      //
+      // The user-assigned identity exists so its AcrPull and Key Vault grants can
+      // be made BEFORE the app is created (see modules/identity.bicep). But the
+      // mail plugin requests a managed-identity token WITHOUT a client_id, and
+      // with only user-assigned identities attached that request is ambiguous —
+      // the platform cannot know which to issue for. Enabling the system-assigned
+      // identity gives a client_id-less request one unambiguous answer, which is
+      // the identity the Logic App's `sub` claim is then pinned to.
+      //
+      // Removing 'SystemAssigned' here breaks outbound email, and it breaks it
+      // silently: the token request fails at SEND time, so the first symptom is
+      // a password-reset message that never arrives.
+    type: 'SystemAssigned, UserAssigned'
     userAssignedIdentities: {
       '${managedIdentityId}': {}
     }
@@ -298,3 +312,9 @@ output appId string = app.id
 output appName string = app.name
 output environmentId string = acaEnv.id
 output environmentDefaultDomain string = acaEnv.properties.defaultDomain
+// The address the environment egresses from. Needed to allow-list this app at
+// anything outside it — the email Logic App, or another service's firewall.
+output outboundIp string = acaEnv.properties.staticIp
+// The principal a client_id-less managed-identity token belongs to. The email
+// Logic App pins its `sub` claim to this.
+output systemAssignedPrincipalId string = app.identity.principalId

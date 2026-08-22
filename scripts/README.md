@@ -37,6 +37,7 @@ with the vault or your access to it, and it says so. See
 | `azure-nuke.sh` | Tear down. `--keep-storage` preserves the uploads |
 | `rotate-secrets.sh` | `--list`, `--rotate db\|salt` |
 | `migrate.sh` | Existing site → Azure. **`--audit` first, always** |
+| `setup-email.sh` | Finish wiring outbound email. `--status`, `--test <addr>` |
 
 ## Called by other things
 
