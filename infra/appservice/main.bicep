@@ -78,6 +78,9 @@ param publicShareQuotaGB int = 100
 param privateShareQuotaGB int = 100
 
 param logRetentionDays int = 30
+@description('Provision the outbound-email Logic App and Office 365 connection. Requires one interactive consent afterwards — see docs/email.md.')
+param deployEmail bool = true
+
 
 @description('Cron expression (UTC) for Drupal cron. On App Service this drives a scheduled GitHub workflow rather than a platform job — see docs/operations.md.')
 param cronExpression string = '*/15 * * * *'
@@ -100,6 +103,8 @@ var planName = 'plan-${baseName}-${environment}'
 var appName = 'app-${baseName}-${suffix}'
 var logWorkspaceName = 'log-${baseName}-${suffix}'
 var identityName = 'id-${baseName}-${suffix}'
+var logicAppName = 'logic-${baseName}-mail-${environment}'
+var mailConnectionName = 'conn-${baseName}-o365-${environment}'
 
 var commonTags = {
   project: baseName
@@ -234,6 +239,33 @@ module appservice '../modules/appservice.bicep' = {
   }
 }
 
+module email '../modules/email.bicep' = if (deployEmail) {
+  scope: rg
+  name: 'email'
+  params: {
+    location: location
+    connectionName: mailConnectionName
+    logicAppName: logicAppName
+    connectionDisplayName: 'Office 365 for ${baseName} (${environment}) — authorise me'
+    // The app's own egress, so the allow-list is right in one deployment rather
+    // than needing a follow-up script to discover it.
+    // map() rather than a for-comprehension: a for-expression's collection must
+    // be known when the deployment starts, and this one is another module's
+    // output. map() is evaluated at deployment time, so it can consume it.
+    allowedCallerIps: map(
+      split(appservice.outputs.possibleOutboundIps, ','),
+      ip => { addressRange: '${trim(ip)}/32' }
+    )
+    // Pins the trigger to this app's identity, not merely to the tenant.
+    //
+    // The SYSTEM-assigned principal, not the user-assigned one: the mail plugin
+    // requests a token without a client_id, so that is the identity the token is
+    // actually issued to. Pinning the user-assigned principal here would look
+    // correct and reject every send with a 401.
+    callerPrincipalId: appservice.outputs.systemAssignedPrincipalId
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Outputs. scripts/azure-up.sh prints these and the workflows consume them.
 // ---------------------------------------------------------------------------
@@ -250,6 +282,9 @@ output mysqlDatabase string = mysql.outputs.databaseName
 output storageAccountName string = storage.outputs.accountName
 output keyVaultName string = keyvault.outputs.keyVaultName
 output managedIdentityClientId string = identity.outputs.clientId
+output emailLogicAppName string = deployEmail ? email!.outputs.logicAppName : ''
+output emailConnectionName string = deployEmail ? email!.outputs.connectionName : ''
+output emailAuthorizeUrl string = deployEmail ? email!.outputs.authorizeUrl : ''
 output imageReference string = '${acr.outputs.loginServer}/${imageName}:${imageTag}'
 // The addresses the app can egress from. Needed when allow-listing it at a
 // firewall elsewhere, and when adding it to another service's rules.

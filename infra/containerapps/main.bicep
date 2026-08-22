@@ -79,6 +79,9 @@ param publicShareQuotaGB int = 100
 param privateShareQuotaGB int = 100
 
 param logRetentionDays int = 30
+@description('Provision the outbound-email Logic App and Office 365 connection. Requires one interactive consent afterwards — see docs/email.md.')
+param deployEmail bool = true
+
 
 @description('Cron expression (UTC) for the scheduled Drupal cron job. See infra/modules/jobs.bicep for why cron is a Job rather than automated_cron.')
 param cronExpression string = '*/15 * * * *'
@@ -103,6 +106,8 @@ var acaEnvName = 'acaenv-${baseName}-${suffix}'
 var acaAppName = 'app-${baseName}'
 var logWorkspaceName = 'log-${baseName}-${suffix}'
 var identityName = 'id-${baseName}-${suffix}'
+var logicAppName = 'logic-${baseName}-mail-${environment}'
+var mailConnectionName = 'conn-${baseName}-o365-${environment}'
 
 var commonTags = {
   project: baseName
@@ -263,6 +268,31 @@ module jobs '../modules/jobs.bicep' = if (deployJobs) {
   }
 }
 
+module email '../modules/email.bicep' = if (deployEmail) {
+  scope: rg
+  name: 'email'
+  params: {
+    location: location
+    connectionName: mailConnectionName
+    logicAppName: logicAppName
+    connectionDisplayName: 'Office 365 for ${baseName} (${environment}) — authorise me'
+    // The app's own egress, so the allow-list is right in one deployment rather
+    // than needing a follow-up script to discover it.
+    // A single egress address for the whole environment, so no loop is needed —
+    // an array literal containing a runtime value is fine.
+    allowedCallerIps: [
+      { addressRange: '${aca.outputs.outboundIp}/32' }
+    ]
+    // Pins the trigger to this app's identity, not merely to the tenant.
+    //
+    // The SYSTEM-assigned principal, not the user-assigned one: the mail plugin
+    // requests a token without a client_id, so that is the identity the token is
+    // actually issued to. Pinning the user-assigned principal here would look
+    // correct and reject every send with a 401.
+    callerPrincipalId: aca.outputs.systemAssignedPrincipalId
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Outputs. scripts/azure-up.sh prints these and the workflows consume them.
 // ---------------------------------------------------------------------------
@@ -277,6 +307,9 @@ output mysqlDatabase string = mysql.outputs.databaseName
 output storageAccountName string = storage.outputs.accountName
 output keyVaultName string = keyvault.outputs.keyVaultName
 output managedIdentityClientId string = identity.outputs.clientId
+output emailLogicAppName string = deployEmail ? email!.outputs.logicAppName : ''
+output emailConnectionName string = deployEmail ? email!.outputs.connectionName : ''
+output emailAuthorizeUrl string = deployEmail ? email!.outputs.authorizeUrl : ''
 output imageReference string = '${acr.outputs.loginServer}/${imageName}:${imageTag}'
 output cronJobName string = deployJobs ? jobs!.outputs.cronJobName : ''
 output drushJobName string = deployJobs ? jobs!.outputs.drushJobName : ''

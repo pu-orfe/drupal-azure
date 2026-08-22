@@ -160,6 +160,21 @@ docker-compose logs db | tail -40
 Check Docker's memory allocation first; MySQL 8 needs more than the default on
 some setups.
 
+### Email is not arriving, and nothing is failing
+
+The most likely cause is that nothing is configured, because the failure is
+**silent by construction**: Drupal's default mail system accepts every message and
+a container with no MTA delivers none. No error, no bounce, nothing in a log.
+
+```bash
+./scripts/setup-email.sh --status
+```
+
+That reports whether the endpoint is set, whether the Office 365 connection has
+been authorised, and whether the trigger's access controls are in place. The most
+common answer is that the one manual consent step was never done. See
+[email.md](email.md#verifying) for the run-history query and a symptom table.
+
 ### `composer install` failed on a package that exists
 
 A transient 429 or 504 from GitHub. `scripts/composer-retry.sh` retries twelve

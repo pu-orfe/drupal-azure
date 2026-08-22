@@ -39,3 +39,4 @@ param publicShareQuotaGB = int(readEnvironmentVariable('PUBLIC_SHARE_QUOTA_GB', 
 param privateShareQuotaGB = int(readEnvironmentVariable('PRIVATE_SHARE_QUOTA_GB', '100'))
 param logRetentionDays = int(readEnvironmentVariable('LOG_RETENTION_DAYS', '30'))
 param cronExpression = readEnvironmentVariable('DRUPAL_CRON_EXPRESSION', '*/15 * * * *')
+param deployEmail = bool(readEnvironmentVariable('DEPLOY_EMAIL', 'true'))
