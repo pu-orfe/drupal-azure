@@ -119,6 +119,28 @@ group name in the logs makes every failure harder to read and protects nothing.
 
 ---
 
+## Until you have done this, the workflows skip
+
+The Azure-dependent workflows check for their configuration and **skip** rather
+than fail when it is absent — so a fresh clone does not produce red runs before
+anyone has done anything wrong, and `drupal-cron.yml` in particular does not fail
+every fifteen minutes.
+
+| Workflow | Gated on |
+|---|---|
+| `deploy.yml` | a `preflight` job checking all three variables and `AZURE_CLIENT_ID` |
+| `drupal-cron.yml` | `vars.AZURE_APP_NAME` |
+| `scheduled-backup.yml` | `vars.AZURE_RESOURCE_GROUP` |
+| `pull-request.yml`, `composer-update.yml`, `security-audit.yml` | nothing — they need no Azure access and work immediately |
+
+They start running **by themselves** once the values exist. There is nothing to
+uncomment, which is deliberate: the alternative — commenting out the trigger and
+telling people to restore it after bootstrapping — reliably ends with nobody
+remembering, and the first real deploy being a manual one.
+
+If a deploy skips when you expect it to run, the run summary names the missing
+value.
+
 ## Verifying
 
 ```bash

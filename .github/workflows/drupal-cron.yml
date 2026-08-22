@@ -42,7 +42,12 @@ concurrency:
 
 jobs:
   cron:
-    if: vars.AZURE_PLATFORM != 'containerapps'
+    # AZURE_APP_NAME gates the whole thing. Without it this workflow would run
+    # every fifteen minutes on a fresh clone and fail every time — which trains
+    # everyone to ignore a red cron, exactly the signal that matters when cron
+    # really does break. On Container Apps a platform Job owns cron instead, so
+    # this is skipped there too.
+    if: vars.AZURE_APP_NAME != '' && vars.AZURE_PLATFORM != 'containerapps'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

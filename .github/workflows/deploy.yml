@@ -67,8 +67,65 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Is this repository wired up to an Azure deployment yet?
+  #
+  # A fresh clone of this template has no repository variables and no OIDC
+  # federation, so every push to main would fail at `az login` and produce a red
+  # run — before anyone has done anything wrong. The obvious workaround is to
+  # comment out the push trigger and tell people to uncomment it after
+  # bootstrapping, which is what the deployments this template came from did; the
+  # trouble is that nobody remembers, so the first real deploy is silently manual.
+  #
+  # This gate skips instead. It costs one ten-second job, it explains itself in
+  # the run summary, and it starts deploying on its own the moment the variables
+  # exist — no commit required.
+  # ---------------------------------------------------------------------------
+  preflight:
+    name: Check the deployment is configured
+    runs-on: ubuntu-latest
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    steps:
+      - name: Check for the required configuration
+        id: check
+        env:
+          RG: ${{ vars.AZURE_RESOURCE_GROUP }}
+          ACR: ${{ vars.AZURE_ACR_NAME }}
+          APP: ${{ vars.AZURE_APP_NAME }}${{ vars.AZURE_CONTAINER_APP_NAME }}
+          CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        run: |
+          missing=""
+          [ -n "$RG" ]        || missing="$missing AZURE_RESOURCE_GROUP(variable)"
+          [ -n "$ACR" ]       || missing="$missing AZURE_ACR_NAME(variable)"
+          [ -n "$APP" ]       || missing="$missing AZURE_APP_NAME(variable)"
+          # Only the presence of the secret is tested, never its value.
+          [ -n "$CLIENT_ID" ] || missing="$missing AZURE_CLIENT_ID(secret)"
+
+          if [ -z "$missing" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            echo "Deployment is configured; proceeding." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "configured=false" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Deploy skipped — this repository is not wired to Azure yet"
+            echo
+            echo "Missing:"
+            for m in $missing; do echo "- \`$m\`"; done
+            echo
+            echo "This is expected on a fresh clone of the template and is **not a failure**."
+            echo "Set it up with [docs/getting-started.md](docs/getting-started.md) and"
+            echo "[docs/github-actions.md](docs/github-actions.md); this workflow starts"
+            echo "deploying by itself once the values exist."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice::Deploy skipped: not configured for Azure yet. See the run summary."
+
   build:
     name: Build and push image
+    needs: preflight
+    if: needs.preflight.outputs.configured == 'true'
     runs-on: ubuntu-latest
     outputs:
       image_tag: ${{ steps.meta.outputs.tag }}
@@ -167,8 +224,8 @@ jobs:
 
   rollout-appservice:
     name: Rollout (App Service)
-    needs: build
-    if: vars.AZURE_PLATFORM != 'containerapps'
+    needs: [preflight, build]
+    if: needs.preflight.outputs.configured == 'true' && vars.AZURE_PLATFORM != 'containerapps'
     runs-on: ubuntu-latest
     environment: production
     steps:
@@ -266,8 +323,8 @@ jobs:
 
   rollout-containerapps:
     name: Gated rollout (Container Apps)
-    needs: build
-    if: vars.AZURE_PLATFORM == 'containerapps'
+    needs: [preflight, build]
+    if: needs.preflight.outputs.configured == 'true' && vars.AZURE_PLATFORM == 'containerapps'
     runs-on: ubuntu-latest
     environment: production
     steps:

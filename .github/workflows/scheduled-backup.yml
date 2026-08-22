@@ -26,6 +26,11 @@ permissions:
 
 jobs:
   backup:
+    # Skip rather than fail on a repository that is not wired to Azure yet. A
+    # nightly red run that means "not configured" is indistinguishable from one
+    # that means "the backup is broken", and the second is the one you need to
+    # see.
+    if: vars.AZURE_RESOURCE_GROUP != ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
