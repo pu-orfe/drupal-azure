@@ -1,0 +1,51 @@
+###############################################################################
+# Nightly backup.
+#
+# Azure gives MySQL Flexible Server automated backups with point-in-time restore
+# (7 days by default), and that covers most of what people mean by "we have
+# backups". Two things it does not cover, which this workflow does:
+#
+#   * The file shares. PITR restores the database only. A Drupal site whose
+#     database is restored to yesterday and whose files are current has broken
+#     every managed-file reference in between.
+#   * A restore target outside the server's own lifecycle. PITR restores INTO a
+#     new server in the same subscription; it is no help if the resource group is
+#     deleted, and none of it is downloadable.
+###############################################################################
+
+name: Scheduled backup
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  backup:
+    # Skip rather than fail on a repository that is not wired to Azure yet. A
+    # nightly red run that means "not configured" is indistinguishable from one
+    # that means "the backup is broken", and the second is the one you need to
+    # see.
+    if: vars.AZURE_RESOURCE_GROUP != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Snapshot the file shares and dump the database
+        env:
+          AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+          AZURE_APP_NAME: ${{ vars.AZURE_APP_NAME || vars.AZURE_CONTAINER_APP_NAME }}
+          AZURE_PLATFORM: ${{ vars.AZURE_PLATFORM || 'appservice' }}
+          BACKUP_NON_INTERACTIVE: '1'
+        run: ./scripts/azure-backup.sh

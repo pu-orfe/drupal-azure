@@ -1,0 +1,121 @@
+###############################################################################
+# Daily audit of the committed lock file.
+#
+# The weekly composer-update job only surfaces advisories when it runs, so an
+# advisory published on a Tuesday sits unnoticed in main until the following
+# Monday. Drupal advisories are frequently remotely exploitable and are published
+# with working details, so six days is not an acceptable window.
+#
+# This audits every day and keeps exactly one tracking issue open, updating it
+# rather than filing a duplicate daily and closing it when the audit passes
+# again.
+###############################################################################
+
+name: Security audit
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  AUDIT_LABEL: security
+  ISSUE_TITLE: "Security advisory affecting Composer dependencies"
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          # Same PHP as the Dockerfile, so the audit resolves exactly as the
+          # runtime does.
+          php-version: '8.3'
+          tools: composer:v2
+
+      - name: Audit
+        id: audit
+        run: |
+          set +e
+          composer audit --no-interaction --abandoned=report --locked > audit.txt 2>&1
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          set -e
+          cat audit.txt
+
+      - name: Compose issue body
+        if: steps.audit.outputs.exit_code != '0'
+        run: |
+          {
+            echo "\`composer audit --locked\` found one or more advisories affecting dependencies on \`main\`."
+            echo
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| Commit | \`${GITHUB_SHA}\` |"
+            echo "| Detected | $(date -u '+%Y-%m-%d %H:%M UTC') |"
+            echo "| Run | [${GITHUB_RUN_ID}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) |"
+            echo
+            echo "### Audit output"
+            echo '```'
+            cat audit.txt
+            echo '```'
+            echo
+            echo "### Remediation"
+            echo "Use the workflow dispatch on **Composer update** with the affected package named, so the"
+            echo "diff contains the security fix and nothing else:"
+            echo
+            echo '```'
+            echo "gh workflow run composer-update.yml -f packages='<vendor>/<package>'"
+            echo '```'
+            echo
+            echo "Prefer the narrowest update that clears the advisory. \`--with-all-dependencies\` pulls in"
+            echo "unrelated transitive bumps and makes the security change harder to review."
+            echo
+            echo "_Maintained automatically by the Security audit workflow; closed once the audit passes._"
+          } > issue.md
+
+      - name: Open or update the tracking issue
+        if: steps.audit.outputs.exit_code != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create "$AUDIT_LABEL" --color B60205 \
+            --description "Security advisory requiring remediation" 2>/dev/null || true
+
+          existing=$(gh issue list --state open --label "$AUDIT_LABEL" \
+            --search "$ISSUE_TITLE in:title" --json number --jq '.[0].number // empty')
+
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --body-file issue.md
+            echo "Updated issue #$existing"
+          else
+            gh issue create --title "$ISSUE_TITLE" --body-file issue.md --label "$AUDIT_LABEL"
+          fi
+
+      - name: Close the tracking issue when clean
+        if: steps.audit.outputs.exit_code == '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue list --state open --label "$AUDIT_LABEL" \
+            --search "$ISSUE_TITLE in:title" --json number --jq '.[].number' \
+            | while read -r n; do
+                [ -n "$n" ] || continue
+                gh issue comment "$n" --body "Resolved: \`composer audit --locked\` passed on \`${GITHUB_SHA}\`."
+                gh issue close "$n"
+              done
+
+      # Last, so the issue is filed before the run goes red. A red scheduled run
+      # is the at-a-glance signal that main needs attention; it clears on the next
+      # run after remediation.
+      - name: Fail if advisories were found
+        if: steps.audit.outputs.exit_code != '0'
+        run: |
+          echo "::error::composer audit reported advisories affecting main. See the tracking issue."
+          exit 1

@@ -279,6 +279,12 @@ prompt_resource_group() {
 ###############################################################################
 # prompt_container_app
 #
+# SUPERSEDED by platform_resolve() in lib/platform.sh, which resolves the app
+# name on either platform and sets AZURE_APP_URL alongside it. Kept because it is
+# a documented entry point and costs nothing; new scripts should source
+# lib/platform.sh instead.
+#
+#
 # Lists container apps in AZURE_RESOURCE_GROUP. Auto-selects if only one.
 # Stores the result in AZURE_CONTAINER_APP_NAME.
 ###############################################################################

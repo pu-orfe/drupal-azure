@@ -1,0 +1,23 @@
+# ---------------------------------------------------------------------------
+# Submodules.
+#
+# The Entra ID pieces this template expects a deployment to carry are split
+# across two mechanisms, and the split is not arbitrary:
+#
+#   * Authentication is CONTRIB, installed by Composer: drupal/azure_oauth_sso
+#     plus drupal/externalauth. It is versioned, patchable and needs no
+#     submodule. See docs/AUTHENTICATION.md.
+#   * Outbound mail is a SUBMODULE, because it is a first-party module that
+#     depends on Azure resources this template provisions and has no
+#     drupal.org release.
+#
+# A submodule rather than a Composer path repository so a `git clone
+# --recurse-submodules` of the deployment is complete, and so the module's own
+# history stays separate from the site's.
+#
+# Clone with:  git clone --recurse-submodules <this repo>
+# Already cloned:  git submodule update --init --recursive
+# ---------------------------------------------------------------------------
+[submodule "web/modules/custom/azure_logic_app_mailer"]
+	path = web/modules/custom/azure_logic_app_mailer
+	url = https://github.com/pu-orfe/azure_logic_app_mailer.git

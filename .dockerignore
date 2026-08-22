@@ -1,11 +1,117 @@
+# ===========================================================================
+# Build context exclusions.
+#
+# READ THIS BEFORE ADDING A PATTERN: in .dockerignore a single `*` does NOT
+# cross `/`. A bare `*.sql` matches only TOP-LEVEL files, so a dump sitting in
+# examples/ or import/ reaches the image despite `*.sql` being listed. Every
+# archive pattern below is therefore written twice — once bare, once with `**/`.
+#
+# This matters more than it looks. The Dockerfile does `COPY . .` into
+# /var/www/html, and `az acr build .` / `docker build .` send everything in the
+# working directory — INCLUDING UNTRACKED FILES. A 5 MB production database dump
+# left in a developer's checkout is normal working debris; these patterns are
+# what stands between that and a file shipped inside the production image.
+#
+# scripts/verify-production-image.sh asserts on the built ARTIFACT rather than on
+# this file, because this file is the control and that is the verification that
+# the control worked.
+# ===========================================================================
+
+# ── Version control and CI ──
 .git
-.github
 .gitignore
+.gitattributes
+.github
 .dockerignore
+
+# ── Documentation ──
 *.md
+**/*.md
+docs/
+LICENSE
+
+# ── Infrastructure and tooling: not needed at runtime ──
 infra/
-scripts/
+tests/
 docker-compose*.yml
-.env*
-PLAN.md
-SHARED_TASK_NOTES.md
+Dockerfile.dev
+phpunit.xml.dist
+.phpunit.cache
+
+# scripts/ is deliberately NOT excluded: the Dockerfile copies
+# scripts/composer-retry.sh, and having verify/rollback scripts inside the image
+# is useful when diagnosing a live container.
+
+# ── Dependencies: installed during the build ──
+vendor/
+node_modules/
+web/core/
+web/modules/contrib/
+web/themes/contrib/
+web/profiles/contrib/
+web/libraries/
+
+# ── Runtime state: supplied by Azure Files mounts ──
+web/sites/default/files/
+private/
+files/
+
+# ── Local settings and secrets ──
+.env
+.env.*
+*.pem
+*.key
+web/sites/default/settings.local.php
+web/sites/*/settings.local.php
+web/sites/*/services.yml
+
+# ── Database dumps and archives: MUST NOT enter the build context ──
+*.sql
+**/*.sql
+*.sql.gz
+**/*.sql.gz
+*.dump
+**/*.dump
+*.gz
+**/*.gz
+*.tar
+**/*.tar
+*.tgz
+**/*.tgz
+*.zip
+**/*.zip
+*.bz2
+**/*.bz2
+*.xz
+**/*.xz
+*.zst
+**/*.zst
+*.7z
+**/*.7z
+*.sqlite
+**/*.sqlite
+*.sqlite3
+**/*.sqlite3
+
+# Staging directories a migration uses.
+import/
+backups/
+snapshots/
+
+# Log bundles pulled down from Azure for debugging.
+LogFiles/
+**/LogFiles/
+*_logs.zip
+
+# ── Editors and OS ──
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# ── Agent files ──
+.claude/
+CLAUDE.md

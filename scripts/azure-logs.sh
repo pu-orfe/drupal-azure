@@ -6,7 +6,8 @@
 #
 # Environment variable overrides (skip prompts when set):
 #   AZURE_RESOURCE_GROUP      — Azure resource group name
-#   AZURE_CONTAINER_APP_NAME  — Container app name
+#   AZURE_PLATFORM            — appservice (default) | containerapps
+#   AZURE_APP_NAME            — web app or container app name (detected if unset)
 ###############################################################################
 set -euo pipefail
 
@@ -14,11 +15,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # ── Shared prompt library ──
 source "$SCRIPT_DIR/lib/prompt.sh"
+source "$SCRIPT_DIR/lib/platform.sh"
 
 # ── Colors ──
 RED='\033[0;31m'
 GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 BOLD='\033[1m'
@@ -50,20 +51,23 @@ echo -e "${NC}"
 
 # ── Interactive prompts (skipped when env vars are set) ──
 prompt_resource_group
-prompt_container_app
+platform_resolve || exit 1
+if [[ -z "${AZURE_APP_NAME:-}" ]]; then
+  err "No app found in $AZURE_RESOURCE_GROUP. Deploy first, or set AZURE_APP_NAME."
+  exit 1
+fi
+info "Platform: $AZURE_PLATFORM   App: $AZURE_APP_NAME"
 
 # ── Stream logs ──
 info "Streaming logs (last $TAIL_LINES lines)..."
 echo ""
 
-FOLLOW_ARGS=()
 if $FOLLOW; then
-  FOLLOW_ARGS+=(--follow)
+  platform_logs "$TAIL_LINES" yes
+else
+  platform_logs "$TAIL_LINES" no
 fi
 
-az containerapp logs show \
-  --name "$AZURE_CONTAINER_APP_NAME" \
-  --resource-group "$AZURE_RESOURCE_GROUP" \
-  --tail "$TAIL_LINES" \
-  "${FOLLOW_ARGS[@]}" \
-  --type console
+# Both platforms stream only what is happening now, and a destroyed instance or
+# replica takes its buffer with it. The logs from the deploy that broke something
+# three weeks ago are in Log Analytics — see docs/operations.md for the query.

