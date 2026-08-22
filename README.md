@@ -1,195 +1,182 @@
-# Drupal 10 on Azure Container Apps
+# Drupal on Azure
 
-Migrates a Composer-based Drupal 10 site from cPanel to Azure Container Apps with zero-downtime deployments, auto-scaling, and automated updates.
-
-## Architecture
-
-| Component | Azure Service |
-|-----------|--------------|
-| Compute | Container Apps (scale-to-zero, blue/green revisions) |
-| Database | MySQL Flexible Server (VNet-integrated) |
-| Files | Storage Account (SMB file shares for public/private) |
-| Registry | Azure Container Registry |
-| Network | VNet with dedicated app and database subnets |
-| Logging | Log Analytics workspace |
-
-Updates flow through GitHub Actions: `composer update` -> Docker build -> push to ACR -> deploy new Container App revision -> run Drush post-deploy commands. No in-place modifications.
-
-## Repository Layout
-
-```
-.
-├── Dockerfile                         # PHP 8.2-FPM + Nginx (single container)
-├── docker/
-│   ├── drupal/settings.aca.php        # Azure-specific Drupal settings
-│   ├── nginx/default.conf             # Nginx vhost for Drupal clean URLs
-│   └── supervisor/supervisord.conf    # Runs Nginx + PHP-FPM together
-├── infra/
-│   ├── main.bicep                     # Subscription-level orchestrator
-│   ├── main.bicepparam                # Default parameter values
-│   └── modules/
-│       ├── aca.bicep                  # Container Apps environment + app
-│       ├── acr.bicep                  # Container Registry
-│       ├── logging.bicep              # Log Analytics workspace
-│       ├── mysql.bicep                # MySQL Flexible Server
-│       ├── networking.bicep           # VNet + subnets
-│       └── storage.bicep              # Storage account + file shares
-├── scripts/
-│   ├── azure-up.sh                    # Deploy/update infrastructure
-│   ├── azure-logs.sh                  # Stream container logs
-│   ├── azure-backup.sh               # On-demand DB + file share backup
-│   ├── azure-nuke.sh                 # Tear down everything (with safeguards)
-│   └── migrate.sh                     # cPanel -> Azure data migration
-└── .github/workflows/
-    └── drupal-update.yml              # CI/CD: composer update, build, deploy
-```
-
-## Prerequisites
-
-- **Azure CLI** (`az`) — [install](https://aka.ms/install-azure-cli)
-- **Docker** — for local image builds
-- **azcopy** — [install](https://aka.ms/azcopy) (migration only)
-- **SSH access** to your cPanel host (migration only)
-- **Drupal codebase** — `composer.json`, `composer.lock`, and `web/` directory at the repo root
-
-## Deployment
-
-### 1. Prepare your Drupal codebase
-
-Copy or merge your existing Drupal project into this repo so that `composer.json`, `composer.lock`, and the `web/` directory sit at the root alongside the `Dockerfile`.
-
-### 2. Log in to Azure
+A production-ready deployment template for a Composer-based Drupal site on Azure.
 
 ```bash
-az login
+git clone --recurse-submodules <this repo> && cd drupal-azure
+./scripts/local-dev.sh          # Drupal on http://localhost:8080, admin/admin
 ```
 
-### 3. Deploy infrastructure
+That needs Docker and nothing else. When you are ready for Azure:
+**[Getting started](docs/getting-started.md)**.
 
-Dry-run first to preview changes:
+---
+
+## Is this for you?
+
+**Yes, if** you are running a departmental or institutional Drupal site — tens to
+low hundreds of users — and you want it on Azure with the database off the public
+internet, secrets in Key Vault, one immutable image per commit, and deploys that
+fail loudly instead of quietly.
+
+**Probably not, if** you need multi-site, thousands of concurrent users, or a
+provider-neutral setup. This is deliberately Azure-shaped.
+
+**Note:** logins are **Entra ID only**. There are no working local passwords. See
+**[Authentication](docs/authentication.md)**.
+
+## What you get
+
+| | |
+|---|---|
+| **MySQL Flexible Server** | Delegated subnet, no public endpoint, TLS required, version pinned |
+| **Azure Files** | Public and private upload shares, default-deny, VNet-scoped |
+| **Key Vault** | Secrets read by managed identity, generated not typed, never in the app config |
+| **Container Registry** | Pull by managed identity; the admin account is off |
+| **One image per commit** | Rollback is repointing a tag or shifting traffic — never a rebuild |
+| **A deploy that checks itself** | Validated pre-deploy backup, schema updates before the app goes live, a smoke test that reads the response body |
+| **Local dev that matches** | MySQL 8 with production's collation and `sql_mode` |
+| **A real test suite** | Unit tests for the settings logic, shell tests for the destructive-path guards, and an integration suite that boots the production image against real MySQL 8 |
+
+Two hosting platforms are supported and **App Service is the default** —
+[why](docs/choosing-a-platform.md). Switching is one environment variable, not a
+rewrite.
+
+---
+
+## Documentation
+
+Also available as an index: [`docs/`](docs/README.md).
+
+**Start here**
+
+| | |
+|---|---|
+| **[Getting started](docs/getting-started.md)** | Local → deployed, end to end |
+| **[Choosing a platform](docs/choosing-a-platform.md)** | App Service or Container Apps. The one real decision |
+
+**Running it**
+
+| | |
+|---|---|
+| **[Troubleshooting](docs/troubleshooting.md)** | Start here when something breaks. Organised by symptom |
+| **[Operations](docs/operations.md)** | Logs, rollbacks, restores, drush, scaling |
+| **[Configuration](docs/configuration.md)** | Every variable, and where it comes from |
+
+**Setting things up**
+
+| | |
+|---|---|
+| **[Authentication](docs/authentication.md)** | Entra-only logins, and why `genpass` is not optional |
+| **[Secrets](docs/secrets.md)** | Key Vault, rotation, and proving a rotation took effect |
+| **[GitHub Actions](docs/github-actions.md)** | OIDC federation — no stored credentials |
+| **[Migrating a site](docs/migrating-a-site.md)** | Bringing an existing Drupal site in |
+
+**Understanding it**
+
+| | |
+|---|---|
+| **[Design notes](docs/design-notes.md)** | Why the image, entrypoint and probes are shaped this way |
+| **[Database settings](docs/database.md)** | Collation, isolation, and the traps |
+| **[Production learnings](docs/production-learnings.md)** | The incidents behind the decisions. Read before "simplifying" anything |
+
+---
+
+## How a deploy works
+
+```
+push to main
+  └─ build the image, tagged with the commit SHA
+  └─ verify it structurally                     scripts/verify-production-image.sh
+  └─ roll it out
+       └─ entrypoint, inside the container:
+            reject any secret that did not resolve
+            wait for the database (authenticated query, not a ping)
+            take the deploy lock                one instance does the work
+            take a VALIDATED pre-deploy backup  size + gzip + trailer checked
+            drush updb → config:import → cache:rebuild, each exit code recorded
+            record the image version            so a restart skips all of this
+  └─ smoke-test it                              scripts/verify-site.sh
+  └─ roll back on failure
+```
+
+Four properties are worth naming, because they are what most Drupal-on-Azure
+pipelines get wrong:
+
+**Schema updates run before the app is live, not after traffic moves.** Running
+`drush updb` from CI afterwards means requests hit new code against an old schema
+— and `az containerapp exec` gives no exit code a workflow can trust, so a failed
+schema update produced a *green* deploy.
+
+**They run once per image, not once per start.** The entrypoint records the
+image's version in the database and skips the sequence when it matches, so
+restarts and scale-ups boot fast. A lock covers several replicas starting at once.
+
+**The backup is validated, not assumed.** A failed `mysqldump | gzip` writes a
+*valid* ~20-byte gzip, and writing straight to the destination destroys the
+previous good backup. If the dump does not validate, the boot refuses to run
+schema updates.
+
+**The smoke test reads the body, and checks who answered.** Drupal returns 200
+with a blank page for a fatal error, and an access-restricted site returns 403 for
+every path including ones that do not exist. `verify-site.sh` has three outcomes:
+pass, fail, and **inconclusive**.
+
+---
+
+## Common commands
 
 ```bash
-./scripts/azure-up.sh --what-if
+./scripts/local-dev.sh                  # local stack
+./scripts/test.sh                       # all suites
+./scripts/azure-up.sh                   # deploy/update infrastructure
+./scripts/azure-logs.sh                 # stream logs
+./scripts/rollback.sh --previous        # roll back
+./scripts/drush.sh cache:rebuild        # drush, with a real exit code
+./scripts/kudu.sh cat /home/boot-result.json    # what the last boot did
+./scripts/azure-backup.sh               # backup
+./scripts/rotate-secrets.sh --rotate db # rotate a secret
+./scripts/azure-nuke.sh --keep-storage  # tear down, keep the files
 ```
 
-When satisfied, deploy for real:
+Every script reads its configuration from the environment and prompts only when a
+value is missing, so the same script works interactively and in CI. Full list:
+[`scripts/README.md`](scripts/README.md).
 
-```bash
-export MYSQL_ADMIN_PASSWORD='<strong-password>'
-./scripts/azure-up.sh
+---
+
+## Repository layout
+
+```
+Dockerfile  Dockerfile.dev  docker-compose.yml
+docker-entrypoint.sh          boot: secrets, lock, backup, updb/cim/cr, marker
+docker/
+  entrypoint-lib.sh           the destructive-path guards, separately testable
+  drupal/settings.azure.php   the settings overlay — the file to read first
+  nginx/  php/  php-fpm/  supervisor/
+infra/
+  appservice/                 default platform
+  containerapps/              alternative platform
+  modules/                    shared building blocks
+scripts/                      see scripts/README.md
+tests/
+  php/                        settings-overlay unit tests
+  shell/                      scripts, guards, cross-file consistency
+docs/                         see the table above
 ```
 
-The script deploys all Bicep modules (VNet, MySQL, Storage, ACR, Log Analytics, Container Apps) into a resource group named `rg-drupal-prod`. Outputs include the ACR login server, container app FQDN, and MySQL hostname.
+---
 
-**Tunable parameters** (set via environment variables before running):
+## Things this template deliberately does not do
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `AZURE_LOCATION` | `eastus` | Azure region |
-| `AZURE_BASE_NAME` | `drupal` | Base name for all resources (max 9 chars recommended) |
-| `AZURE_ENVIRONMENT` | `prod` | Environment tag (`dev`, `staging`, `prod`) |
-| `MYSQL_ADMIN_PASSWORD` | *(prompted)* | MySQL admin password |
-
-### 4. Build and push the Docker image
-
-```bash
-ACR_NAME=$(az acr list -g rg-drupal-prod --query '[0].name' -o tsv)
-az acr login --name "$ACR_NAME"
-docker build -t "$ACR_NAME.azurecr.io/app-drupal:latest" .
-docker push "$ACR_NAME.azurecr.io/app-drupal:latest"
-```
-
-After the first push, the Container App will pull the image and start serving.
-
-### 5. Migrate data from cPanel
-
-Set the required environment variables and run the migration script:
-
-```bash
-export CPANEL_HOST=example.com
-export CPANEL_USER=myuser
-export CPANEL_DB_NAME=drupal_db
-export CPANEL_DB_USER=drupal_user
-export CPANEL_DB_PASS='db-password'
-
-export AZURE_RG=rg-drupal-prod
-export AZURE_MYSQL_HOST=$(az mysql flexible-server list -g rg-drupal-prod --query '[0].fullyQualifiedDomainName' -o tsv)
-export AZURE_MYSQL_USER=drupaladmin
-export AZURE_MYSQL_PASS="$MYSQL_ADMIN_PASSWORD"
-export AZURE_STORAGE_ACCOUNT=$(az storage account list -g rg-drupal-prod --query '[0].name' -o tsv)
-
-./scripts/migrate.sh
-```
-
-The script exports the database via SSH, sanitizes it (removes DEFINERs), imports to Azure MySQL, then rsyncs public and private files to Azure File Shares via azcopy.
-
-### 6. Configure GitHub Actions
-
-In your GitHub repository settings, add:
-
-**Secret:**
-- `AZURE_CREDENTIALS` — output of `az ad sp create-for-rbac --sdk-auth`
-
-**Variables:**
-- `AZURE_RESOURCE_GROUP` — e.g. `rg-drupal-prod`
-- `AZURE_ACR_NAME` — your ACR name
-- `AZURE_CONTAINER_APP_NAME` — e.g. `app-drupal`
-
-The workflow runs weekly (Sunday 03:00 UTC) or on manual dispatch. It runs `composer update`, builds a new image, deploys it, and executes `drush updb` and `drush cr`.
-
-## Maintenance
-
-### View logs
-
-```bash
-./scripts/azure-logs.sh                # follow logs (default)
-./scripts/azure-logs.sh --tail 50      # last 50 lines
-./scripts/azure-logs.sh --no-follow    # snapshot only
-```
-
-Scripts auto-detect the resource group and container app name. Override with `AZURE_RESOURCE_GROUP` and `AZURE_CONTAINER_APP_NAME` if needed.
-
-### Create backups
-
-```bash
-./scripts/azure-backup.sh
-```
-
-Creates an on-demand MySQL backup and snapshots both `drupal-public` and `drupal-private` file shares.
-
-### Tear down infrastructure
-
-```bash
-./scripts/azure-nuke.sh
-```
-
-Requires typing the resource group name and `DELETE` to confirm. Automatically runs a backup before deleting. The deletion runs asynchronously — use the printed command to check status.
-
-### Manual Drush commands
-
-```bash
-az containerapp exec \
-  --name app-drupal \
-  --resource-group rg-drupal-prod \
-  --command "sh" -- -c "drush status"
-```
-
-### Scaling
-
-Default configuration scales from 0 to 3 replicas. Adjust in `infra/main.bicep`:
-
-```bicep
-param minReplicas int = 0   // set to 1 to disable scale-to-zero
-param maxReplicas int = 3
-param appCpu string = '0.5'
-param appMemory string = '1Gi'
-```
-
-Redeploy with `./scripts/azure-up.sh` after changing parameters.
-
-## Known Limitations
-
-- Storage account name can exceed the 24-character Azure limit if `baseName` is longer than 9 characters.
-- `settings.aca.php` trusted host patterns only cover `*.azurecontainerapps.io` — add custom domains manually if needed.
-- `DRUPAL_HASH_SALT` environment variable must be set on the Container App; there is no fallback.
-- Drush launcher may need to be replaced with a direct symlink to `vendor/bin/drush` for Drush 12+.
+- **No Redis or Memcached.** Drupal's database cache is adequate to a surprisingly
+  high traffic level, and adding a cache service before measuring a need buys an
+  extra failure mode.
+- **No CDN in front of the files share.** Azure Files over SMB is a round trip per
+  asset — fine at low volume, worth fronting if you serve many large files.
+- **No custom domain automation.** Two `az` commands, but it needs DNS records
+  this template cannot create. Remember to add the domain to
+  `DRUPAL_TRUSTED_HOSTS`.
+- **No horizontal scaling on App Service.** It needs shared session and cache
+  handling that is not set up here; without it users get randomly dropped
+  sessions. Scale vertically, or use Container Apps.

@@ -1,0 +1,122 @@
+###############################################################################
+# Pull request gate.
+#
+# The production image was previously built only by the deploy workflow, so a
+# breakage in the Dockerfile, the entrypoint or the settings overlay first
+# surfaced in production. Everything here runs before merge.
+###############################################################################
+
+name: Pull request
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint workflows and scripts
+    runs-on: ubuntu-latest
+    env:
+      ACTIONLINT_VERSION: '1.7.7'
+    steps:
+      - uses: actions/checkout@v4
+
+      # A pinned release binary rather than a third-party action, to keep the
+      # supply-chain surface of a linting job smaller than the thing it lints.
+      - name: Install actionlint
+        run: |
+          set -euo pipefail
+          archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "$archive" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${archive}"
+          tar -xzf "$archive" actionlint
+          ./actionlint --version
+
+      - name: "actionlint (with shellcheck over every run block)"
+        run: ./actionlint -verbose -shellcheck=shellcheck -ignore 'SC2016' -ignore 'SC2129' -color
+
+      - name: shellcheck the shell scripts
+        run: |
+          set -euo pipefail
+          # SC1091: sourced files (lib/prompt.sh) are resolved at runtime.
+          shellcheck --severity=warning --exclude=SC1091 \
+            docker-entrypoint.sh scripts/*.sh scripts/lib/*.sh
+
+      - name: Validate Bicep
+        run: |
+          set -euo pipefail
+          az bicep install
+          # --stdout with lint warnings promoted: a Bicep warning here is
+          # typically a real deployment failure later (a null module output, a
+          # name that will exceed a service limit).
+          # BOTH platform templates, every time. Only one is deployed, but a
+          # template that no longer compiles is discovered at deploy time
+          # otherwise — and the one you are not currently using is exactly the
+          # one that rots.
+          for platform in appservice containerapps; do
+            echo "--- infra/$platform ---"
+            az bicep build --file "infra/$platform/main.bicep" --stdout > /dev/null
+            az bicep build-params --file "infra/$platform/main.bicepparam" --stdout > /dev/null
+          done
+
+  composer:
+    name: Composer validate and audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          tools: composer:v2
+          extensions: gd, pdo_mysql, zip, intl, opcache, apcu
+
+      # --strict catches the things that break a build much later: a lock file
+      # out of sync with composer.json, an unbounded version constraint, a
+      # missing allow-plugins entry that makes the scaffold silently not run.
+      - name: composer validate --strict
+        run: composer validate --strict
+
+      - name: composer audit
+        run: composer audit --no-interaction --abandoned=report --locked
+
+      - name: Install dependencies
+        env:
+          COMPOSER_AUTH: '{"github-oauth":{"github.com":"${{ secrets.GITHUB_TOKEN }}"}}'
+        run: ./scripts/composer-retry.sh install --no-interaction --no-progress
+
+      - name: Unit tests
+        run: vendor/bin/phpunit --colors=always --testsuite unit
+
+  image:
+    name: Production image gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Builds the real production Dockerfile and asserts the properties that can
+      # be checked from outside it. See the script for what each check is for —
+      # every one corresponds to a failure that reached production once.
+      - name: Build and verify the production image
+        env:
+          COMPOSER_AUTH: '{"github-oauth":{"github.com":"${{ secrets.GITHUB_TOKEN }}"}}'
+        run: ./scripts/verify-production-image.sh
+
+  integration:
+    name: Boot against MySQL 8
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Nothing else in this pipeline touches a database, so without this job a
+      # green CI says nothing about the thing the site actually runs on. This
+      # exercises the whole boot path — entrypoint, deploy lock, settings
+      # overlay, nginx, php-fpm — against the same engine and collation as
+      # production.
+      - name: Bring up the stack and assert Drupal serves
+        run: ./scripts/test.sh --integration

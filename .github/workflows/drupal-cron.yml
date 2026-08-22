@@ -1,0 +1,62 @@
+###############################################################################
+# Drupal cron — App Service only.
+#
+# Drupal's own automated_cron is disabled in the settings overlay, because it
+# fires at the end of a web request: with no traffic it never runs, and with
+# traffic it lands on whichever instance served the request. Search indexing,
+# queue processing and log pruning then stop silently, which is the worst way for
+# a maintenance task to fail.
+#
+# On Container Apps this is a scheduled Container Apps Job on the same image
+# (infra/modules/jobs.bicep) — strictly better, because it is a platform job with
+# an execution history and it does not involve CI at all. App Service has no
+# equivalent for Linux containers, so this workflow drives it instead.
+#
+# Note what it does NOT do: it does not call a public /cron/<key> URL. That would
+# put the site's availability, the ingress allow-list and a long-lived cron key on
+# the critical path for a task that has no reason to be reachable from outside.
+# Kudu runs it inside the container, authenticated by Entra RBAC, and returns the
+# exit code — so a failed cron is a red run rather than silence.
+###############################################################################
+
+name: Drupal cron
+
+on:
+  schedule:
+    # Every 15 minutes. GitHub's scheduler is best-effort and can be minutes late
+    # or skip a run under load — acceptable for Drupal cron, which is idempotent
+    # and takes its own lock, and a reason to prefer Container Apps Jobs if cron
+    # timing actually matters to you.
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  # Never overlap. Drupal's cron takes its own lock, so a second run would exit
+  # non-zero having done nothing — reporting a failure where there is none.
+  group: drupal-cron
+  cancel-in-progress: false
+
+jobs:
+  cron:
+    if: vars.AZURE_PLATFORM != 'containerapps'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Run drush cron
+        env:
+          AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+          AZURE_APP_NAME: ${{ vars.AZURE_APP_NAME }}
+          AZURE_PLATFORM: appservice
+        run: ./scripts/drush.sh cron --verbose

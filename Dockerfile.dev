@@ -1,0 +1,52 @@
+# ===========================================================================
+# Local development image.
+#
+# Same base and same extensions as the production Dockerfile, deliberately: CI
+# runs the test suites in THIS image, so if the two diverge on PHP version or
+# extensions then "green CI" is a statement about a runtime that does not exist.
+# scripts/verify-production-image.sh asserts they agree.
+#
+# What differs from production, and only this:
+#   * dev dependencies installed (phpunit, phpstan)
+#   * opcache timestamp validation ON, since the code is bind-mounted and edited
+#   * no entrypoint deploy sequence — scripts/local-dev.sh drives that explicitly
+#   * errors displayed in the response, because that is the point of local dev
+# ===========================================================================
+ARG PHP_VERSION=8.3
+FROM php:${PHP_VERSION}-fpm-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      nginx supervisor mariadb-client unzip git curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+ADD https://github.com/mlocati/docker-php-extension-installer/releases/latest/download/install-php-extensions /usr/local/bin/
+RUN chmod +x /usr/local/bin/install-php-extensions \
+    && install-php-extensions gd pdo_mysql zip intl opcache apcu uploadprogress pdo_sqlite \
+    && rm -f /usr/local/bin/install-php-extensions
+
+COPY --from=composer:2 /usr/bin/composer /usr/local/bin/composer
+
+RUN mv "$PHP_INI_DIR/php.ini-development" "$PHP_INI_DIR/php.ini" \
+    && { \
+      echo 'memory_limit=1G'; \
+      echo 'upload_max_filesize=128M'; \
+      echo 'post_max_size=128M'; \
+      echo 'max_execution_time=0'; \
+      echo 'display_errors=On'; \
+      echo 'opcache.enable=1'; \
+      echo 'opcache.validate_timestamps=1'; \
+      echo 'opcache.revalidate_freq=0'; \
+      echo 'opcache.save_comments=1'; \
+    } > "$PHP_INI_DIR/conf.d/99-dev.ini"
+
+COPY docker/php-fpm/www.conf         /usr/local/etc/php-fpm.d/zz-www.conf
+COPY docker/nginx/default.conf       /etc/nginx/sites-available/default
+COPY docker/supervisor/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+
+COPY docker/entrypoint-lib.sh /usr/local/lib/drupal-azure/entrypoint-lib.sh
+
+WORKDIR /var/www/html
+RUN mkdir -p private && chown -R www-data:www-data private
+
+EXPOSE 80
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]

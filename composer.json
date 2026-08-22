@@ -1,6 +1,6 @@
 {
-    "name": "drupal/recommended-project",
-    "description": "Project template for Drupal projects with a relocated document root",
+    "name": "pu-orfe/drupal-azure",
+    "description": "Drupal on Azure \u2014 deployment template",
     "type": "project",
     "license": "GPL-2.0-or-later",
     "homepage": "https://www.drupal.org/project/drupal",
@@ -16,9 +16,11 @@
     ],
     "require": {
         "composer/installers": "^2.0",
+        "drupal/azure_oauth_sso": "^1.0",
         "drupal/core-composer-scaffold": "^10.6",
-        "drupal/core-project-message": "^10.6",
         "drupal/core-recommended": "^10.6",
+        "drupal/externalauth": "^2.0.3",
+        "drupal/genpass": "^2.0 || ^3.0",
         "drush/drush": "^13.7"
     },
     "conflict": {
@@ -30,12 +32,14 @@
         "allow-plugins": {
             "composer/installers": true,
             "drupal/core-composer-scaffold": true,
-            "drupal/core-project-message": true,
             "phpstan/extension-installer": true,
             "dealerdirect/phpcodesniffer-composer-installer": true,
             "php-http/discovery": true
         },
-        "sort-packages": true
+        "sort-packages": true,
+        "platform": {
+            "php": "8.3"
+        }
     },
     "extra": {
         "drupal-scaffold": {
@@ -71,27 +75,17 @@
             "web/themes/custom/{$name}": [
                 "type:drupal-custom-theme"
             ]
-        },
-        "drupal-core-project-message": {
-            "include-keys": [
-                "homepage",
-                "support"
-            ],
-            "post-create-project-cmd-message": [
-                "<bg=blue;fg=white>                                                         </>",
-                "<bg=blue;fg=white>  Congratulations, you’ve installed the Drupal codebase  </>",
-                "<bg=blue;fg=white>  from the drupal/recommended-project template!          </>",
-                "<bg=blue;fg=white>                                                         </>",
-                "",
-                "<bg=yellow;fg=black>Next steps</>:",
-                "  * Install the site: https://www.drupal.org/docs/installing-drupal",
-                "  * Read the user guide: https://www.drupal.org/docs/user_guide/en/index.html",
-                "  * Get support: https://www.drupal.org/support",
-                "  * Get involved with the Drupal community:",
-                "      https://www.drupal.org/getting-involved",
-                "  * Remove the plugin that prints this message:",
-                "      composer remove drupal/core-project-message"
-            ]
         }
+    },
+    "require-dev": {
+        "drupal/core-dev": "^10.6"
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Drupal\\Tests\\Aca\\": "tests/php/"
+        }
+    },
+    "scripts": {
+        "test": "phpunit --colors=always"
     }
 }

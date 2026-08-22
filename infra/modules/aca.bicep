@@ -1,31 +1,74 @@
-// Azure Container Apps Environment + Drupal Container App
+// ---------------------------------------------------------------------------
+// Container Apps environment + the Drupal container app.
+// ---------------------------------------------------------------------------
 param location string
 param acaEnvName string
 param acaAppName string
-param logWorkspaceId string
 param logWorkspaceCustomerId string
 @secure()
 param logWorkspaceKey string
 param infraSubnetId string
+
 param acrLoginServer string
-param acrName string
+param imageName string
+param imageTag string = 'latest'
+
+param managedIdentityId string
+
 param storageName string
 @secure()
 param storageAccountKey string
+param publicShareName string
+param privateShareName string
+
 param mysqlHost string
 param mysqlUser string
-@secure()
-param mysqlPassword string
 param mysqlDatabase string
+param mysqlCollation string
+param mysqlPasswordSecretUri string
+param hashSaltSecretUri string
+
 param appCpu string
 param appMemory string
 param minReplicas int
 param maxReplicas int
+param concurrentRequests string = '50'
+
+@description('Comma-separated custom domains Drupal should accept as a Host header. The Container Apps default domain is always allowed.')
+param trustedHosts string = ''
+
+@description('Environment label, surfaced to Drupal for the environment indicator.')
+param environmentName string = 'prod'
+
+@description('''
+Ingress allow-list. Empty means open to the internet.
+
+Each entry: { name: string, ipAddressRange: 'CIDR', action: 'Allow' }.
+Container Apps requires every rule in the list to share the same action — a
+mixed Allow/Deny list is rejected — so an Allow list is implicitly
+"deny everything else".
+''')
+param ipAllowList array = []
+
+@description('''
+Seconds the startup probe will tolerate before Container Apps gives up on a
+replica.
+
+This is sized for the entrypoint, not for nginx. docker-entrypoint.sh runs
+`drush updb`, `config:import` and `cache:rebuild` BEFORE starting the web
+server, so on a deploy that carries schema updates nothing listens on port 80
+for minutes. A default-length startup probe kills the replica part-way through a
+schema update — which is how a half-migrated database happens.
+
+Liveness and readiness only begin after the startup probe succeeds, so a
+generous value here does not slow down failure detection later.
+''')
+param startupProbeTimeoutSeconds int = 900
 
 // ---------------------------------------------------------------------------
-// Container Apps Environment
+// Environment
 // ---------------------------------------------------------------------------
-resource acaEnv 'Microsoft.App/managedEnvironments@2023-11-02-preview' = {
+resource acaEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
   name: acaEnvName
   location: location
   properties: {
@@ -40,109 +83,199 @@ resource acaEnv 'Microsoft.App/managedEnvironments@2023-11-02-preview' = {
         sharedKey: logWorkspaceKey
       }
     }
+    zoneRedundant: false
   }
 }
 
 // ---------------------------------------------------------------------------
-// Mount Azure File Shares into the ACA Environment
+// Azure Files, attached to the environment so the app can mount them.
 // ---------------------------------------------------------------------------
-resource publicStorage 'Microsoft.App/managedEnvironments/storages@2023-11-02-preview' = {
+resource publicStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01' = {
   parent: acaEnv
   name: 'drupal-public'
   properties: {
     azureFile: {
       accountName: storageName
       accountKey: storageAccountKey
-      shareName: 'drupal-public'
+      shareName: publicShareName
       accessMode: 'ReadWrite'
     }
   }
 }
 
-resource privateStorage 'Microsoft.App/managedEnvironments/storages@2023-11-02-preview' = {
+resource privateStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01' = {
   parent: acaEnv
   name: 'drupal-private'
   properties: {
     azureFile: {
       accountName: storageName
       accountKey: storageAccountKey
-      shareName: 'drupal-private'
+      shareName: privateShareName
       accessMode: 'ReadWrite'
     }
   }
 }
 
 // ---------------------------------------------------------------------------
-// Container App
+// The app
 // ---------------------------------------------------------------------------
-resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' existing = {
-  name: acrName
-}
-
-resource app 'Microsoft.App/containerApps@2023-11-02-preview' = {
+resource app 'Microsoft.App/containerApps@2024-03-01' = {
   name: acaAppName
   location: location
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: {
+      '${managedIdentityId}': {}
+    }
+  }
   properties: {
     managedEnvironmentId: acaEnv.id
     configuration: {
+      // Multiple, so a new revision can be created, health-checked and only
+      // then given traffic — and so the previous revision is still there to roll
+      // back to. In Single mode the old revision is deactivated the moment the
+      // new one is provisioned, which means the rollback path is "rebuild and
+      // redeploy" rather than "shift traffic back".
       activeRevisionsMode: 'Multiple'
+
       ingress: {
         external: true
         targetPort: 80
         transport: 'auto'
+        allowInsecure: false
+        // Bootstrap only. .github/workflows/deploy.yml pins traffic to an
+        // explicit revision before it creates a new one, precisely so the new
+        // revision does NOT receive traffic until it has passed a smoke test.
+        // Leaving latestRevision:true in place would shift 100% of traffic onto
+        // an unproven revision the instant it is created, which is what made
+        // this template's "zero-downtime blue/green" claim untrue.
         traffic: [
           {
             latestRevision: true
             weight: 100
           }
         ]
+        ipSecurityRestrictions: ipAllowList
+        stickySessions: {
+          // Drupal keeps sessions in its own database table, so any replica can
+          // serve any authenticated user. Sticky sessions would only concentrate
+          // load and make a drain worse.
+          affinity: 'none'
+        }
       }
+
+      // Image pull by managed identity. No registry username, no password
+      // secret, nothing to rotate.
       registries: [
         {
           server: acrLoginServer
-          username: acr.listCredentials().username
-          passwordSecretRef: 'acr-password'
+          identity: managedIdentityId
         }
       ]
+
+      // Key Vault references, resolved at replica start with the managed
+      // identity. The value is never in this template, in a parameter file, or
+      // in `az containerapp show` output.
       secrets: [
         {
-          name: 'acr-password'
-          value: acr.listCredentials().passwords[0].value
+          name: 'mysql-password'
+          keyVaultUrl: mysqlPasswordSecretUri
+          identity: managedIdentityId
         }
         {
-          name: 'mysql-password'
-          value: mysqlPassword
+          name: 'drupal-hash-salt'
+          keyVaultUrl: hashSaltSecretUri
+          identity: managedIdentityId
         }
       ]
     }
+
     template: {
+      // Give a draining replica time to finish in-flight requests. Supervisor
+      // stops nginx first with SIGQUIT, then php-fpm; the default 30s can cut a
+      // slow authenticated page off mid-render.
+      terminationGracePeriodSeconds: 60
+
       containers: [
         {
           name: 'drupal'
-          image: '${acrLoginServer}/${acaAppName}:latest'
+          image: '${acrLoginServer}/${imageName}:${imageTag}'
           resources: {
             cpu: json(appCpu)
             memory: appMemory
           }
           env: [
             { name: 'DRUPAL_DB_HOST', value: mysqlHost }
+            { name: 'DRUPAL_DB_PORT', value: '3306' }
             { name: 'DRUPAL_DB_NAME', value: mysqlDatabase }
             { name: 'DRUPAL_DB_USER', value: mysqlUser }
             { name: 'DRUPAL_DB_PASSWORD', secretRef: 'mysql-password' }
-            { name: 'DRUPAL_DB_PORT', value: '3306' }
             { name: 'DRUPAL_DB_DRIVER', value: 'mysql' }
+            // Must match infra/modules/mysql.bicep's database collation. See
+            // the comment there and in settings.azure.php for what breaks if they
+            // diverge.
+            { name: 'DRUPAL_DB_COLLATION', value: mysqlCollation }
+            { name: 'DRUPAL_DB_ISOLATION_LEVEL', value: 'READ COMMITTED' }
+            { name: 'DRUPAL_DB_SSL_MODE', value: 'verify' }
+            { name: 'DRUPAL_HASH_SALT', secretRef: 'drupal-hash-salt' }
+            { name: 'DRUPAL_TRUSTED_HOSTS', value: trustedHosts }
+            { name: 'DRUPAL_FILE_PRIVATE_PATH', value: '/var/www/html/private' }
+            { name: 'DRUPAL_ENVIRONMENT', value: environmentName }
+            // Pre-deploy dumps land on the private share, so they outlive the
+            // replica that took them.
+            { name: 'DRUPAL_BACKUP_DIR', value: '/var/www/html/private/.deploy-backups' }
           ]
           volumeMounts: [
             { volumeName: 'public-files', mountPath: '/var/www/html/web/sites/default/files' }
             { volumeName: 'private-files', mountPath: '/var/www/html/private' }
           ]
+          probes: [
+            {
+              // Covers the entrypoint's database work. failureThreshold x
+              // periodSeconds is the budget.
+              type: 'Startup'
+              httpGet: { path: '/nginx-health', port: 80 }
+              periodSeconds: 10
+              timeoutSeconds: 5
+              failureThreshold: startupProbeTimeoutSeconds / 10
+            }
+            {
+              // nginx-level, no PHP and no database. A liveness probe that hits
+              // Drupal restarts every replica at once when the database blips,
+              // turning a recoverable outage into a crash loop.
+              type: 'Liveness'
+              httpGet: { path: '/nginx-health', port: 80 }
+              periodSeconds: 15
+              timeoutSeconds: 5
+              failureThreshold: 3
+            }
+            {
+              // Readiness DOES go through Drupal, because "should this replica
+              // receive traffic" genuinely depends on whether Drupal can serve.
+              // A replica with a broken database drops out of the pool instead
+              // of returning 500s.
+              type: 'Readiness'
+              httpGet: { path: '/', port: 80 }
+              initialDelaySeconds: 5
+              periodSeconds: 20
+              timeoutSeconds: 10
+              failureThreshold: 3
+              successThreshold: 1
+            }
+          ]
         }
       ]
+
       volumes: [
-        { name: 'public-files', storageName: 'drupal-public', storageType: 'AzureFile' }
-        { name: 'private-files', storageName: 'drupal-private', storageType: 'AzureFile' }
+        { name: 'public-files', storageName: publicStorage.name, storageType: 'AzureFile' }
+        { name: 'private-files', storageName: privateStorage.name, storageType: 'AzureFile' }
       ]
+
       scale: {
+        // minReplicas: 0 saves money and costs a cold start of tens of seconds
+        // on the first request — plus, in the worst case, the full startup-probe
+        // window if the boot also has deploy tasks to run. For anything
+        // user-facing, set 1. See README "Scaling".
         minReplicas: minReplicas
         maxReplicas: maxReplicas
         rules: [
@@ -150,7 +283,7 @@ resource app 'Microsoft.App/containerApps@2023-11-02-preview' = {
             name: 'http-scaling'
             http: {
               metadata: {
-                concurrentRequests: '50'
+                concurrentRequests: concurrentRequests
               }
             }
           }
@@ -158,8 +291,10 @@ resource app 'Microsoft.App/containerApps@2023-11-02-preview' = {
       }
     }
   }
-  dependsOn: [publicStorage, privateStorage]
 }
 
 output fqdn string = app.properties.configuration.ingress.fqdn
 output appId string = app.id
+output appName string = app.name
+output environmentId string = acaEnv.id
+output environmentDefaultDomain string = acaEnv.properties.defaultDomain

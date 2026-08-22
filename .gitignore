@@ -48,3 +48,16 @@ SHARED_TASK_NOTES.md
 # Temporary
 tmp/
 temp/
+/.editorconfig
+/.gitattributes
+
+# Test artifacts
+/.phpunit.cache/
+/.phpunit.result.cache
+
+# Migration and backup staging. Anything here is a production data extract:
+# git-ignored so it cannot be committed, and .dockerignore'd so it cannot be
+# baked into an image either.
+/import/
+/backups/
+/snapshots/

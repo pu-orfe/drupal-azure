@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Two suites, and the split matters.
+
+  "unit" exercises the settings overlay by including it under a controlled
+  environment. That overlay is the only part of this template that is PHP logic
+  rather than configuration, and it is logic that is easy to get subtly wrong in
+  ways no deploy would reveal: a trusted-host pattern that matches more than
+  intended is not a broken site, it is an open one.
+
+  The boot sequence itself cannot be asserted from PHP, so it is covered by
+  scripts/test.sh with the integration flag, which brings up the real container against a
+  real MySQL 8 and checks that Drupal serves.
+
+  PHPUnit 9.6 schema: that is the version drupal/core-dev pins for Drupal 10, and
+  matching it keeps the test tooling identical to what the site's own tests would
+  use.
+-->
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="https://schema.phpunit.de/9.6/phpunit.xsd"
+         bootstrap="tests/php/bootstrap.php"
+         colors="true"
+         failOnWarning="true"
+         failOnRisky="true"
+         cacheResultFile=".phpunit.cache/result">
+  <testsuites>
+    <testsuite name="unit">
+      <directory>tests/php</directory>
+    </testsuite>
+  </testsuites>
+  <coverage>
+    <include>
+      <directory suffix=".php">docker/drupal</directory>
+    </include>
+  </coverage>
+</phpunit>
